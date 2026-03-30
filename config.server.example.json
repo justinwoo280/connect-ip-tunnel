@@ -1,0 +1,33 @@
+{
+  "mode": "server",
+  "server": {
+    "listen": ":443",
+    "uri_template": "/.well-known/masque/ip",
+    "tun": {
+      "name": "tun0",
+      "mtu": 1400,
+      "ipv4_cidr": "10.0.0.1/24",
+      "ipv6_cidr": "fd00::1/64"
+    },
+    "tls": {
+      "cert_file": "/path/to/cert.pem",
+      "key_file": "/path/to/key.pem",
+      "enable_pqc": true,
+      "enable_session_cache": true,
+      "session_cache_size": 256
+    },
+    "http3": {
+      "enable_datagrams": true,
+      "max_idle_timeout": "60s",
+      "keep_alive_period": "20s"
+    },
+    "auth": {
+      "method": "bearer",
+      "bearer_token": "your-secret-token-here"
+    },
+    "ipv4_pool": "10.0.0.0/24",
+    "ipv6_pool": "fd00::/64",
+    "enable_nat": true,
+    "nat_interface": ""
+  }
+}
