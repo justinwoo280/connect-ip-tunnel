@@ -10,7 +10,6 @@ import (
 
 	"connect-ip-tunnel/option"
 	"connect-ip-tunnel/platform/tun"
-	securityauth "connect-ip-tunnel/security/auth"
 	securitytls "connect-ip-tunnel/security/tls"
 
 	"github.com/quic-go/quic-go"
@@ -33,7 +32,6 @@ type Server struct {
 
 	listener   *quic.Listener
 	httpServer *qhttp3.Server
-	authProv   *securityauth.Provider
 
 	sessions   map[string]*Session // sessionID -> Session
 	sessionsMu sync.RWMutex
@@ -133,12 +131,14 @@ func (s *Server) Start() error {
 			}
 		}()
 
-		// 2. 构建 TLS 配置
+		// 2. 构建 TLS 配置（含 mTLS）
 		tlsServer, err := securitytls.NewServer(securitytls.ServerOptions{
 			CertFile:           s.cfg.TLS.CertFile,
 			KeyFile:            s.cfg.TLS.KeyFile,
 			NextProtos:         []string{"h3"},
 			EnablePQC:          s.cfg.TLS.EnablePQC,
+			EnableMTLS:         s.cfg.TLS.EnableMTLS,
+			ClientCAFile:       s.cfg.TLS.ClientCAFile,
 			EnableSessionCache: s.cfg.TLS.EnableSessionCache,
 			SessionCacheSize:   s.cfg.TLS.SessionCacheSize,
 		})
@@ -147,24 +147,11 @@ func (s *Server) Start() error {
 			return
 		}
 
-		// 3. 构建鉴权提供者
-		if s.cfg.Auth.Method != "" && s.cfg.Auth.Method != "none" {
-			authCfg := securityauth.Config{
-				Method:      securityauth.AuthMethod(s.cfg.Auth.Method),
-				BearerToken: s.cfg.Auth.BearerToken,
-				Username:    s.cfg.Auth.Username,
-				Password:    s.cfg.Auth.Password,
-				HeaderName:  s.cfg.Auth.HeaderName,
-				HeaderValue: s.cfg.Auth.HeaderValue,
-			}
-			if err := authCfg.Validate(); err != nil {
-				startErr = fmt.Errorf("server: invalid auth config: %w", err)
-				return
-			}
-			s.authProv = securityauth.NewProvider(authCfg)
+		if s.cfg.TLS.EnableMTLS {
+			log.Printf("[server] mTLS enabled, client certificates required")
 		}
 
-		// 4. 启动 QUIC 监听器
+		// 3. 启动 QUIC 监听器
 		udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.Listen)
 		if err != nil {
 			startErr = fmt.Errorf("server: resolve listen addr: %w", err)

@@ -32,7 +32,6 @@ type ServerConfig struct {
 	TUN         TUNConfig   `json:"tun"`
 	TLS         TLSConfig   `json:"tls"`
 	HTTP3       HTTP3Config `json:"http3"`
-	Auth        AuthConfig  `json:"auth"`
 
 	// IP 地址池配置
 	IPv4Pool string `json:"ipv4_pool"` // 例如 10.0.0.0/24
@@ -76,9 +75,11 @@ type TLSConfig struct {
 	CertFile string `json:"cert_file,omitempty"` // 服务端证书文件路径
 	KeyFile  string `json:"key_file,omitempty"`  // 服务端私钥文件路径
 
-	// 新增 mTLS 客户端证书配置
-	ClientCertFile string `json:"client_cert_file,omitempty"` // 客户端证书文件路径
+	// mTLS 配置
+	ClientCertFile string `json:"client_cert_file,omitempty"` // 客户端证书文件路径（用于向服务端证明身份）
 	ClientKeyFile  string `json:"client_key_file,omitempty"`  // 客户端私钥文件路径
+	ClientCAFile   string `json:"client_ca_file,omitempty"`   // 服务端用：验证客户端证书的 CA（PEM 格式）
+	EnableMTLS     bool   `json:"enable_mtls"`                // 服务端用：是否启用 mTLS 验证
 
 	EnableSessionCache bool   `json:"enable_session_cache"`
 	SessionCacheSize   int    `json:"session_cache_size"`
@@ -101,10 +102,9 @@ type HTTP3Config struct {
 }
 
 type ConnectIPConfig struct {
-	Addr      string     `json:"addr"` // host:port，例如 proxy.example.com:443
-	URI       string     `json:"uri"`
-	Authority string     `json:"authority"`
-	Auth      AuthConfig `json:"auth"`
+	Addr      string `json:"addr"` // host:port，例如 proxy.example.com:443
+	URI       string `json:"uri"`
+	Authority string `json:"authority"`
 
 	// ADDRESS_ASSIGN: 等待服务端分配 IP 后再配置 TUN
 	WaitForAddressAssign bool          `json:"wait_for_address_assign"` // 默认 true
@@ -115,11 +115,4 @@ type ConnectIPConfig struct {
 	MaxReconnectDelay time.Duration `json:"max_reconnect_delay"` // 默认 30s
 }
 
-type AuthConfig struct {
-	Method      string `json:"method"`                 // none/bearer/basic/custom
-	BearerToken string `json:"bearer_token,omitempty"` // Bearer Token
-	Username    string `json:"username,omitempty"`     // Basic Auth username
-	Password    string `json:"password,omitempty"`     // Basic Auth password
-	HeaderName  string `json:"header_name,omitempty"`  // Custom header name
-	HeaderValue string `json:"header_value,omitempty"` // Custom header value
-}
+

@@ -27,8 +27,7 @@ connect-ip-tunnel/
 │   ├── tun/              # TUN 设备管理
 │   └── bypass/           # Bypass 路由
 ├── security/             # 安全层（共享）
-│   ├── tls/              # TLS 1.3 + ECH + PQC
-│   └── auth/             # 鉴权框架
+│   └── tls/              # TLS 1.3 + ECH + PQC + mTLS
 ├── transport/            # 传输层（共享）
 │   └── http3/            # HTTP/3 over QUIC
 ├── tunnel/               # 隧道层（共享）
@@ -64,10 +63,14 @@ connect-ip-tunnel/
   "mode": "client",
   "client": {
     "tun": { "name": "tun0", "mtu": 1400 },
+    "tls": {
+      "server_name": "proxy.example.com",
+      "client_cert_file": "/path/to/client.crt",
+      "client_key_file": "/path/to/client.key"
+    },
     "connect_ip": {
       "addr": "proxy.example.com:443",
-      "uri": "/.well-known/masque/ip",
-      "auth": { "method": "bearer", "bearer_token": "..." }
+      "uri": "/.well-known/masque/ip"
     }
   }
 }
@@ -86,7 +89,7 @@ connect-ip-tunnel/
 - `server.Server` - 服务端引擎
 - `server.ServeHTTP` - HTTP/3 请求处理器
 - `server.Session` - 客户端会话管理
-- `security/auth.Provider` - 鉴权验证
+- `security/tls` - mTLS 客户端证书验证
 
 **配置示例**：
 ```json
@@ -97,9 +100,10 @@ connect-ip-tunnel/
     "uri_template": "/.well-known/masque/ip",
     "tls": {
       "cert_file": "/path/to/cert.pem",
-      "key_file": "/path/to/key.pem"
-    },
-    "auth": { "method": "bearer", "bearer_token": "..." }
+      "key_file": "/path/to/key.pem",
+      "enable_mtls": true,
+      "client_ca_file": "/path/to/ca.pem"
+    }
   }
 }
 ```
@@ -169,23 +173,7 @@ factory := http3.NewFactory(opts, tlsProvider, tlsOptions, bypassDialer)
 clientConn, _ := factory.Dial(ctx, target)
 ```
 
-### 4. 鉴权框架 (`security/auth/`)
-
-**功能**：
-- 4 种鉴权方式：Bearer Token、HTTP Basic、Custom Header、None
-- 客户端：注入鉴权 header（待 connect-ip-go 库支持）
-- 服务端：验证请求鉴权信息
-
-**配置**：
-```go
-authCfg := securityauth.Config{
-    Method: securityauth.AuthMethodBearer,
-    BearerToken: "your-token",
-}
-authProvider := securityauth.NewProvider(authCfg)
-```
-
-### 5. 数据转发层 (`runner/`)
+### 4. 数据转发层 (`runner/`)
 
 **功能**：
 - 双向 IP 包转发（TUN ↔ Tunnel）
@@ -240,11 +228,12 @@ pump.Run(ctx)
 - X25519MLKEM768 后量子密码学
 - 抵御量子计算机攻击
 
-### 4. 鉴权机制
+### 4. mTLS 双向认证
 
-- 服务端强制鉴权（生产环境）
-- 多种鉴权方式支持
-- 审计日志记录
+- 服务端验证客户端证书
+- 客户端验证服务端证书
+- 替代 HTTP 层鉴权，更安全
+- 支持自定义 CA 或系统 CA
 
 ## 部署场景
 
@@ -309,9 +298,8 @@ sudo ./connect-ip-tunnel -c config.server.json
 - `listen`: 监听地址
 - `uri_template`: URI 模板
 - `tun`: TUN 设备配置
-- `tls`: TLS 服务端配置（需要证书）
+- `tls`: TLS 服务端配置（证书 + mTLS）
 - `http3`: HTTP/3 配置
-- `auth`: 鉴权配置
 - `ipv4_pool`: IPv4 地址池
 - `ipv6_pool`: IPv6 地址池
 

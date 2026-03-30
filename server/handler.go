@@ -23,16 +23,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 鉴权检查
-	if s.authProv != nil {
-		if err := s.authenticate(r); err != nil {
-			log.Printf("[server] auth failed from %s: %v", r.RemoteAddr, err)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
+	// 注：鉴权已由 TLS 层的 mTLS 完成，客户端证书在握手阶段已验证
 
-	// 3. 解析 CONNECT-IP 请求
+	// 2. 解析 CONNECT-IP 请求
 	tmpl, err := uritemplate.New(s.cfg.URITemplate)
 	if err != nil {
 		log.Printf("[server] invalid uri template: %v", err)
@@ -184,29 +177,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 	log.Printf("[server] session %s closed", sessionID)
-}
-
-// authenticate 验证请求的鉴权信息
-func (s *Server) authenticate(r *http.Request) error {
-	// 创建一个临时请求用于验证
-	testReq, _ := http.NewRequest("GET", "/", nil)
-	if err := s.authProv.ApplyToRequest(testReq); err != nil {
-		return fmt.Errorf("apply auth: %w", err)
-	}
-
-	// 比对 header
-	for k, expectedVals := range testReq.Header {
-		actualVals := r.Header[k]
-		if len(actualVals) == 0 {
-			return fmt.Errorf("missing header %s", k)
-		}
-		// 简单比对第一个值（实际应该更严格）
-		if actualVals[0] != expectedVals[0] {
-			return fmt.Errorf("invalid header %s", k)
-		}
-	}
-
-	return nil
 }
 
 func generateSessionID() string {

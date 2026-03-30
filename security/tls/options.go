@@ -16,10 +16,14 @@ type ClientOptions struct {
 	UseMozillaCA bool
 	RootCAs      *x509.CertPool
 
+	// mTLS 客户端证书（用于向服务端证明身份）
+	ClientCertFile string // 客户端证书文件路径
+	ClientKeyFile  string // 客户端私钥文件路径
+
 	// ECH（Encrypted Client Hello）
 	EnableECH     bool
-	ECHConfigList []byte       // 静态 ECH 配置列表（优先于 ECHManager）
-	ECHManager    *ECHManager  // 动态 ECH 管理器（DoH 自动刷新）
+	ECHConfigList []byte      // 静态 ECH 配置列表（优先于 ECHManager）
+	ECHManager    *ECHManager // 动态 ECH 管理器（DoH 自动刷新）
 
 	// TLS Session Cache
 	EnableSessionCache bool
@@ -37,6 +41,11 @@ type ServerOptions struct {
 	NextProtos []string // ALPN 协议列表，例如 []string{"h3"}
 
 	EnablePQC bool // 启用后量子密码学曲线
+
+	// mTLS 配置
+	EnableMTLS   bool           // 启用 mTLS 客户端证书验证
+	ClientCAs    *x509.CertPool // 自定义客户端 CA 池（nil 时使用系统 CA）
+	ClientCAFile string         // 客户端 CA 证书文件路径（PEM 格式，可包含多个证书）
 
 	EnableSessionCache bool // 启用 TLS session 缓存
 	SessionCacheSize   int  // Session 缓存大小

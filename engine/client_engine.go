@@ -201,9 +201,7 @@ func (e *Engine) connectAndRun(ctx context.Context) error {
 		Authority:  e.cfg.ConnectIP.Authority,
 	}
 
-	if e.cfg.ConnectIP.Auth.Method != "" && e.cfg.ConnectIP.Auth.Method != "none" {
-		log.Printf("[engine] warning: auth method %q configured but not yet supported by connect-ip-go library", e.cfg.ConnectIP.Auth.Method)
-	}
+	// 注：鉴权已由 TLS 层的 mTLS 完成，无需在 HTTP 层注入凭证
 
 	session, err := cipClient.Open(ctx, target, connectip.Options{
 		URI:       e.cfg.ConnectIP.URI,
@@ -315,6 +313,9 @@ func (e *Engine) buildTLSOptions() securitytls.ClientOptions {
 		EnablePQC:          e.cfg.TLS.EnablePQC,
 		UseSystemCAs:       e.cfg.TLS.UseSystemCAs,
 		UseMozillaCA:       e.cfg.TLS.UseMozillaCA,
+		// mTLS 客户端证书配置
+		ClientCertFile:     e.cfg.TLS.ClientCertFile,
+		ClientKeyFile:      e.cfg.TLS.ClientKeyFile,
 		EnableSessionCache: e.cfg.TLS.EnableSessionCache,
 		SessionCacheSize:   e.cfg.TLS.SessionCacheSize,
 		KeyLogPath:         e.cfg.TLS.KeyLogPath,

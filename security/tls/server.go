@@ -29,6 +29,21 @@ func (s *serverConfig) Close() error {
 	return nil
 }
 
+// loadClientCAPool 从 PEM 文件加载客户端 CA 证书池
+func loadClientCAPool(caFile string) (*x509.CertPool, error) {
+	pemData, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read ca file: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("no valid certificates found in %s", caFile)
+	}
+
+	return pool, nil
+}
+
 // NewServer 创建 TLS 服务端配置
 func NewServer(opts ServerOptions) (ServerConfig, error) {
 	// 1. 加载证书和私钥
@@ -44,12 +59,25 @@ func NewServer(opts ServerOptions) (ServerConfig, error) {
 		NextProtos:   opts.NextProtos,
 	}
 
-	// 启用 mTLS：要求客户端提供有效证书并进行验证
-	tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	// mTLS 配置：根据配置决定是否启用客户端证书验证
+	if opts.EnableMTLS {
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 
-	// 使用系统根证书作为客户端 CA（如果需要自定义，可在未来扩展）
-	if roots, err := x509.SystemCertPool(); err == nil && roots != nil {
-		tlsCfg.ClientCAs = roots
+		// 优先使用传入的 ClientCAs，其次尝试从文件加载，最后使用系统 CA
+		if opts.ClientCAs != nil {
+			tlsCfg.ClientCAs = opts.ClientCAs
+		} else if opts.ClientCAFile != "" {
+			pool, err := loadClientCAPool(opts.ClientCAFile)
+			if err != nil {
+				return nil, fmt.Errorf("load client CA file: %w", err)
+			}
+			tlsCfg.ClientCAs = pool
+		} else {
+			// 使用系统根证书作为客户端 CA
+			if roots, err := x509.SystemCertPool(); err == nil && roots != nil {
+				tlsCfg.ClientCAs = roots
+			}
+		}
 	}
 
 	// 3. PQC 支持

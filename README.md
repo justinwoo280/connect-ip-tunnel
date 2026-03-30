@@ -24,7 +24,7 @@
 
 **安全层**：
 - TLS 1.3 强制 + ECH（静态/动态 DoH 模式）+ PQC
-- 多种鉴权（Bearer / Basic / Custom Header）
+- mTLS 双向证书认证（客户端/服务端互相验证）
 
 **服务端**：
 - IP 地址池管理（ADDRESS_ASSIGN capsule）
@@ -40,8 +40,7 @@ server/                  # 服务端引擎
 option/                  # 配置结构与校验
 platform/tun/            # TUN 设备抽象（跨平台）
 platform/bypass/         # bypass 路由（跨平台）
-security/tls/            # TLS 1.3 + ECH + PQC
-security/auth/           # 鉴权框架
+security/tls/            # TLS 1.3 + ECH + PQC + mTLS
 transport/http3/         # HTTP/3 over QUIC 连接工厂
 tunnel/                  # PacketTunnel 接口
 tunnel/connectip/        # CONNECT-IP 会话适配
@@ -50,10 +49,10 @@ runner/                  # 双向包泵
 
 ## 下一步
 
-1. 客户端支持 ADDRESS_ASSIGN（等待服务端分配 IP 后再配置 TUN）
-2. 客户端自动重连（指数退避）
-3. 服务端多会话 TUN 包按目的 IP 分发
-4. 客户端鉴权注入（待 connect-ip-go 上游支持或 fork）
+1. ~~客户端支持 ADDRESS_ASSIGN~~（已完成）
+2. ~~客户端自动重连（指数退避）~~（已完成）
+3. ~~服务端多会话 TUN 包按目的 IP 分发~~（已完成）
+4. ~~mTLS 双向证书认证~~（已完成，替代 HTTP 鉴权方案）
 5. 集成测试
 
 ## 快速运行
@@ -71,51 +70,67 @@ sudo go run ./cmd/app -c ./config.server.example.json
 
 ## 配置示例
 
-`config.example.json`：
+### 客户端配置示例
 
 ```json
 {
-  "tun": {
-    "name": "citun0",
-    "mtu": 1400,
-    "file_descriptor": 0,
-    "ipv4_cidr": "10.233.0.2/24",
-    "ipv6_cidr": "fd00:233::2/64",
-    "dns_v4": "1.1.1.1",
-    "dns_v6": "2606:4700:4700::1111"
-  },
-  "bypass": {
-    "enable": true,
-    "server_addr": "example.com:443"
-  },
-  "tls": {
-    "server_name": "example.com",
-    "insecure_skip_verify": false,
-    "enable_ech": false,
-    "enable_pqc": false,
-    "use_system_cas": true,
-    "use_mozilla_ca": false,
-    "enable_session_cache": true,
-    "session_cache_size": 128,
-    "key_log_path": ""
-  },
-  "http3": {
-    "enable_datagrams": true,
-    "max_idle_timeout": 30000000000,
-    "keep_alive_period": 10000000000,
-    "allow_0rtt": true,
-    "disable_path_mtu_probe": false,
-    "initial_stream_window": 6291456,
-    "max_stream_window": 16777216,
-    "initial_conn_window": 15728640,
-    "max_conn_window": 26214400,
-    "disable_compression": false,
-    "tls_handshake_timeout": 10000000000,
-    "max_response_header_sec": 10
-  },
-  "connect_ip": {
-    "uri": "/.well-known/masque/ip",
-    "authority": "example.com"
+  "mode": "client",
+  "client": {
+    "tun": {
+      "name": "citun0",
+      "mtu": 1400
+    },
+    "bypass": {
+      "enable": true,
+      "server_addr": "example.com:443"
+    },
+    "tls": {
+      "server_name": "example.com",
+      "client_cert_file": "/path/to/client.crt",
+      "client_key_file": "/path/to/client.key",
+      "use_system_cas": true,
+      "enable_session_cache": true
+    },
+    "http3": {
+      "enable_datagrams": true,
+      "max_idle_timeout": 30000000000,
+      "keep_alive_period": 10000000000
+    },
+    "connect_ip": {
+      "addr": "example.com:443",
+      "uri": "/.well-known/masque/ip",
+      "authority": "example.com",
+      "wait_for_address_assign": true
+    }
+  }
+}
+```
+
+### 服务端配置示例
+
+```json
+{
+  "mode": "server",
+  "server": {
+    "listen": ":443",
+    "uri_template": "/.well-known/masque/ip/{target}/{ip-protocol}/",
+    "tun": {
+      "name": "citun0",
+      "mtu": 1400,
+      "ipv4_cidr": "10.233.0.1/24"
+    },
+    "tls": {
+      "cert_file": "/path/to/server.crt",
+      "key_file": "/path/to/server.key",
+      "enable_mtls": true,
+      "client_ca_file": "/path/to/ca.crt"
+    },
+    "http3": {
+      "enable_datagrams": true,
+      "max_idle_timeout": 30000000000
+    },
+    "ipv4_pool": "10.233.0.0/24",
+    "enable_nat": true
   }
 }
 ```

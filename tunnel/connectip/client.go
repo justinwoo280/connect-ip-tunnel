@@ -26,9 +26,7 @@ func NewClient(h3 h3transport.ClientFactory, dev tun.Device) *Client {
 // opts.URI 是路径部分（例如 "/.well-known/masque/ip"），
 // 会自动拼接为 https://<authority><uri> 形式的 URI Template。
 //
-// 注意：鉴权功能需要 connect-ip-go 库支持自定义 HTTP header。
-// 当前版本暂不支持，需要 fork 库或等待上游支持。
-// 参见：security/auth/README.md
+// 注意：客户端认证已通过 mTLS 在 TLS 握手阶段完成，无需在 HTTP 层注入鉴权信息。
 func (c *Client) Open(ctx context.Context, target h3transport.Target, opts Options) (*Session, error) {
 	clientConn, err := c.h3.Dial(ctx, target)
 	if err != nil {
