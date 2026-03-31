@@ -15,6 +15,8 @@ func NewProvider() Provider {
 	return &stdlibProvider{}
 }
 
+const defaultECHMaxRetries = 3
+
 func (p *stdlibProvider) NewClient(_ context.Context, opts ClientOptions) (ClientConfig, error) {
 	roots, err := buildRootCAs(opts)
 	if err != nil {
@@ -57,20 +59,37 @@ func (p *stdlibProvider) NewClient(_ context.Context, opts ClientOptions) (Clien
 		keyLogFile = f
 	}
 
-	// ECH 路径
+	maxRetries := opts.ECHMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultECHMaxRetries
+	}
+
+	// ECH 严格模式：EnableECH=true 时必须拿到配置，否则报错；绝不降级为明文 ClientHello。
 	if opts.EnableECH {
 		echList, echMgr, err := resolveECH(opts)
 		if err != nil {
-			return nil, err
+			if keyLogFile != nil {
+				_ = keyLogFile.Close()
+			}
+			return nil, fmt.Errorf("tls: ECH enabled but cannot load config: %w", err)
 		}
-		if len(echList) > 0 {
-			echCfg := buildECHTLSConfig(base, echList)
-			return &stdlibClientConfig{cfg: echCfg, keyLogFile: keyLogFile, echMgr: echMgr}, nil
+		if len(echList) == 0 {
+			if keyLogFile != nil {
+				_ = keyLogFile.Close()
+			}
+			return nil, fmt.Errorf("tls: ECH enabled but no ECH config available (set ech_config_list or ech_domain+ech_doh_server)")
 		}
-		// 无法获取 ECH 配置时降级（不阻断连接）
+		echCfg := buildECHTLSConfig(base, echList)
+		return &stdlibClientConfig{
+			cfg:        echCfg,
+			baseCfg:    base,
+			keyLogFile: keyLogFile,
+			echMgr:     echMgr,
+			maxRetries: maxRetries,
+		}, nil
 	}
 
-	return &stdlibClientConfig{cfg: base, keyLogFile: keyLogFile}, nil
+	return &stdlibClientConfig{cfg: base, baseCfg: base, keyLogFile: keyLogFile}, nil
 }
 
 // resolveECH 从 opts 中解析 ECH 配置列表。
@@ -130,11 +149,18 @@ func buildCurvePreferences(enablePQC bool) []tls.CurveID {
 	}
 }
 
+// ErrECHRejected 在服务端拒绝 ECH 且超过最大重试次数后返回。
+var ErrECHRejected = fmt.Errorf("tls: server rejected ECH after maximum retries, refusing to downgrade")
+
 // stdlibClientConfig 实现 ClientConfig。
 type stdlibClientConfig struct {
-	cfg        *tls.Config
+	cfg        *tls.Config  // 当前生效的 TLS 配置（含 ECH 配置）
+	baseCfg    *tls.Config  // 不含 ECH 的基础配置（用于克隆）
 	keyLogFile *os.File
 	echMgr     *ECHManager // 非 nil 时支持 retry config 更新
+
+	maxRetries  int // ECH HRR 最大重试次数（0 = 无 ECH 模式，不计数）
+	retryCount  int // 已重试次数
 }
 
 func (c *stdlibClientConfig) TLSConfig() *tls.Config {
@@ -142,20 +168,53 @@ func (c *stdlibClientConfig) TLSConfig() *tls.Config {
 }
 
 // HandleHandshakeError 处理握手错误。
-// 若服务端拒绝 ECH 并返回 RetryConfigList，则更新配置并建议重试。
+//
+// ECH 严格模式（maxRetries > 0）：
+//   - 服务端拒绝 ECH 并携带 RetryConfigList → 用新配置重试，最多 maxRetries 次。
+//   - 服务端拒绝 ECH 但无 RetryConfigList，或超过重试上限 → 返回 ErrECHRejected，不降级。
+//
+// 非 ECH 模式（maxRetries == 0）：原样返回错误。
 func (c *stdlibClientConfig) HandleHandshakeError(err error) (retry bool, outErr error) {
 	if err == nil {
 		return false, nil
 	}
-	var echErr *tls.ECHRejectionError
-	if isECHRejection(err, &echErr) && echErr != nil && len(echErr.RetryConfigList) > 0 {
-		c.cfg.EncryptedClientHelloConfigList = echErr.RetryConfigList
-		if c.echMgr != nil {
-			_ = c.echMgr.UpdateFromRetry(echErr.RetryConfigList)
-		}
-		return true, nil
+
+	// 非 ECH 模式，直接透传错误
+	if c.maxRetries == 0 {
+		return false, err
 	}
-	return false, err
+
+	var echErr *tls.ECHRejectionError
+	if !isECHRejection(err, &echErr) {
+		// 非 ECH 拒绝错误（如证书错误、网络错误），直接透传
+		return false, err
+	}
+
+	// 服务端拒绝 ECH，但没有提供 RetryConfigList → 无法重试，断连
+	if echErr == nil || len(echErr.RetryConfigList) == 0 {
+		return false, fmt.Errorf("%w: server provided no retry config", ErrECHRejected)
+	}
+
+	// 超过重试上限 → 断连，不降级
+	if c.retryCount >= c.maxRetries {
+		return false, fmt.Errorf("%w: tried %d time(s)", ErrECHRejected, c.retryCount)
+	}
+
+	// 使用服务端返回的新 ECH 配置重试
+	c.retryCount++
+	newCfg := buildECHTLSConfig(c.baseCfg, echErr.RetryConfigList)
+	c.cfg = newCfg
+
+	if c.echMgr != nil {
+		_ = c.echMgr.UpdateFromRetry(echErr.RetryConfigList)
+	}
+
+	return true, nil
+}
+
+// ResetRetryCount 在成功连接后重置重试计数器。
+func (c *stdlibClientConfig) ResetRetryCount() {
+	c.retryCount = 0
 }
 
 func (c *stdlibClientConfig) Close() error {

@@ -24,6 +24,10 @@ type ClientOptions struct {
 	EnableECH     bool
 	ECHConfigList []byte      // 静态 ECH 配置列表（优先于 ECHManager）
 	ECHManager    *ECHManager // 动态 ECH 管理器（DoH 自动刷新）
+	// ECH HRR 重试次数上限（0 表示使用默认值 3）
+	// 若服务端拒绝 ECH 并返回 RetryConfigList，将使用新配置重试，
+	// 超过上限后直接返回错误，不降级为明文 ClientHello。
+	ECHMaxRetries int
 
 	// TLS Session Cache
 	EnableSessionCache bool
