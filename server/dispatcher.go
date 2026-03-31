@@ -18,8 +18,10 @@ import (
 type PacketDispatcher struct {
 	dev tun.Device
 
-	mu       sync.RWMutex
-	sessions map[string]*dispatchEntry // sessionID -> entry
+	mu        sync.RWMutex
+	sessions  map[string]*dispatchEntry // sessionID -> entry
+	ipv4Index map[netip.Addr]*dispatchEntry
+	ipv6Index map[netip.Addr]*dispatchEntry
 }
 
 type dispatchEntry struct {
@@ -31,21 +33,31 @@ type dispatchEntry struct {
 // NewPacketDispatcher 创建包分发器。
 func NewPacketDispatcher(dev tun.Device) *PacketDispatcher {
 	return &PacketDispatcher{
-		dev:      dev,
-		sessions: make(map[string]*dispatchEntry),
+		dev:       dev,
+		sessions:  make(map[string]*dispatchEntry),
+		ipv4Index: make(map[netip.Addr]*dispatchEntry),
+		ipv6Index: make(map[netip.Addr]*dispatchEntry),
 	}
 }
 
 // RegisterSession 注册一个 session，指定其分配的 IP 前缀。
 func (d *PacketDispatcher) RegisterSession(sessionID string, ipv4Prefix, ipv6Prefix netip.Prefix) chan []byte {
 	inbound := make(chan []byte, 256)
-	d.mu.Lock()
-	d.sessions[sessionID] = &dispatchEntry{
+	entry := &dispatchEntry{
 		ipv4Prefix: ipv4Prefix,
 		ipv6Prefix: ipv6Prefix,
 		inbound:    inbound,
 	}
+
+	d.mu.Lock()
+	if old, ok := d.sessions[sessionID]; ok {
+		d.unindexEntry(old)
+		close(old.inbound)
+	}
+	d.sessions[sessionID] = entry
+	d.indexEntry(entry)
 	d.mu.Unlock()
+
 	log.Printf("[dispatcher] registered session %s (ipv4=%s ipv6=%s)", sessionID, ipv4Prefix, ipv6Prefix)
 	return inbound
 }
@@ -54,11 +66,44 @@ func (d *PacketDispatcher) RegisterSession(sessionID string, ipv4Prefix, ipv6Pre
 func (d *PacketDispatcher) UnregisterSession(sessionID string) {
 	d.mu.Lock()
 	if entry, ok := d.sessions[sessionID]; ok {
-		close(entry.inbound)
+		d.unindexEntry(entry)
 		delete(d.sessions, sessionID)
+		close(entry.inbound)
 	}
 	d.mu.Unlock()
 	log.Printf("[dispatcher] unregistered session %s", sessionID)
+}
+
+func (d *PacketDispatcher) indexEntry(entry *dispatchEntry) {
+	if addr, ok := hostRouteAddr(entry.ipv4Prefix); ok {
+		d.ipv4Index[addr] = entry
+	}
+	if addr, ok := hostRouteAddr(entry.ipv6Prefix); ok {
+		d.ipv6Index[addr] = entry
+	}
+}
+
+func (d *PacketDispatcher) unindexEntry(entry *dispatchEntry) {
+	if addr, ok := hostRouteAddr(entry.ipv4Prefix); ok {
+		delete(d.ipv4Index, addr)
+	}
+	if addr, ok := hostRouteAddr(entry.ipv6Prefix); ok {
+		delete(d.ipv6Index, addr)
+	}
+}
+
+func hostRouteAddr(prefix netip.Prefix) (netip.Addr, bool) {
+	if !prefix.IsValid() {
+		return netip.Addr{}, false
+	}
+	addr := prefix.Addr()
+	if addr.Is4() && prefix.Bits() == 32 {
+		return addr, true
+	}
+	if addr.Is6() && prefix.Bits() == 128 {
+		return addr, true
+	}
+	return netip.Addr{}, false
 }
 
 // Run 启动 TUN 读取循环，根据目的 IP 将包分发到匹配的 session。
@@ -91,37 +136,49 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 			continue
 		}
 
-		// 查找匹配的 session
-		d.mu.RLock()
-		var target *dispatchEntry
-		for _, entry := range d.sessions {
-			if entry.ipv4Prefix.IsValid() && entry.ipv4Prefix.Contains(dstAddr) {
-				target = entry
-				break
-			}
-			if entry.ipv6Prefix.IsValid() && entry.ipv6Prefix.Contains(dstAddr) {
-				target = entry
-				break
-			}
-		}
-		d.mu.RUnlock()
-
+		target := d.lookupSession(dstAddr)
 		if target == nil {
 			// 无匹配 session，丢弃
 			continue
 		}
 
 		// 复制包数据（buf 会被复用）
-		pktCopy := make([]byte, n)
+		pktCopy := bufferpool.GetPacket()[:n]
 		copy(pktCopy, pkt)
 
 		// 尝试发送，满了就丢弃（避免阻塞 TUN 读取）
 		select {
 		case target.inbound <- pktCopy:
 		default:
-			// channel 满，丢弃包
+			bufferpool.PutPacket(pktCopy)
 		}
 	}
+}
+
+func (d *PacketDispatcher) lookupSession(dstAddr netip.Addr) *dispatchEntry {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if dstAddr.Is4() {
+		if entry := d.ipv4Index[dstAddr]; entry != nil {
+			return entry
+		}
+	} else if dstAddr.Is6() {
+		if entry := d.ipv6Index[dstAddr]; entry != nil {
+			return entry
+		}
+	}
+
+	// 回退到前缀匹配，兼容未来非 /32 /128 的分配策略。
+	for _, entry := range d.sessions {
+		if entry.ipv4Prefix.IsValid() && entry.ipv4Prefix.Contains(dstAddr) {
+			return entry
+		}
+		if entry.ipv6Prefix.IsValid() && entry.ipv6Prefix.Contains(dstAddr) {
+			return entry
+		}
+	}
+	return nil
 }
 
 // parseDstAddr 从 IP 包头解析目的地址。

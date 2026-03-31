@@ -16,7 +16,15 @@ type IPPool struct {
 	allocatedIPv4 map[netip.Addr]string // IP -> SessionID
 	allocatedIPv6 map[netip.Addr]string
 
-	// 下一个可分配的 IP
+	// 反向索引：session -> IP
+	sessionIPv4 map[string]netip.Addr
+	sessionIPv6 map[string]netip.Addr
+
+	// 已释放可复用的 IP
+	freeIPv4 []netip.Addr
+	freeIPv6 []netip.Addr
+
+	// 下一个未使用过的可分配 IP
 	nextIPv4 netip.Addr
 	nextIPv6 netip.Addr
 
@@ -27,6 +35,8 @@ func NewIPPool(ipv4Pool, ipv6Pool string) (*IPPool, error) {
 	pool := &IPPool{
 		allocatedIPv4: make(map[netip.Addr]string),
 		allocatedIPv6: make(map[netip.Addr]string),
+		sessionIPv4:   make(map[string]netip.Addr),
+		sessionIPv6:   make(map[string]netip.Addr),
 	}
 
 	// 解析 IPv4 地址池
@@ -59,13 +69,23 @@ func (p *IPPool) AllocateIP(sessionID string) (ipv4Prefix, ipv6Prefix netip.Pref
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// 同一 session 重入时优先复用已分配地址，保持幂等。
+	if ipv4, ok := p.sessionIPv4[sessionID]; ok {
+		ipv4Prefix = netip.PrefixFrom(ipv4, 32)
+	}
+	if ipv6, ok := p.sessionIPv6[sessionID]; ok {
+		ipv6Prefix = netip.PrefixFrom(ipv6, 128)
+	}
+	if ipv4Prefix.IsValid() || ipv6Prefix.IsValid() {
+		return ipv4Prefix, ipv6Prefix, nil
+	}
+
 	// 分配 IPv4
 	if p.ipv4Pool.IsValid() {
 		ipv4, err := p.allocateIPv4(sessionID)
 		if err != nil {
 			return netip.Prefix{}, netip.Prefix{}, fmt.Errorf("allocate ipv4: %w", err)
 		}
-		// 分配 /32 前缀（单个 IP）
 		ipv4Prefix = netip.PrefixFrom(ipv4, 32)
 	}
 
@@ -73,13 +93,11 @@ func (p *IPPool) AllocateIP(sessionID string) (ipv4Prefix, ipv6Prefix netip.Pref
 	if p.ipv6Pool.IsValid() {
 		ipv6, err := p.allocateIPv6(sessionID)
 		if err != nil {
-			// 如果 IPv6 分配失败，回收 IPv4
 			if ipv4Prefix.IsValid() {
-				delete(p.allocatedIPv4, ipv4Prefix.Addr())
+				p.releaseIPv4Locked(sessionID)
 			}
 			return netip.Prefix{}, netip.Prefix{}, fmt.Errorf("allocate ipv6: %w", err)
 		}
-		// 分配 /128 前缀（单个 IP）
 		ipv6Prefix = netip.PrefixFrom(ipv6, 128)
 	}
 
@@ -88,62 +106,82 @@ func (p *IPPool) AllocateIP(sessionID string) (ipv4Prefix, ipv6Prefix netip.Pref
 
 // allocateIPv4 分配一个 IPv4 地址
 func (p *IPPool) allocateIPv4(sessionID string) (netip.Addr, error) {
-	// 从 nextIPv4 开始查找可用 IP
+	if addr, ok := p.popFreeIPv4Locked(); ok {
+		p.allocatedIPv4[addr] = sessionID
+		p.sessionIPv4[sessionID] = addr
+		return addr, nil
+	}
+
 	current := p.nextIPv4
-	poolEnd := p.ipv4Pool.Masked().Addr()
-
-	for {
-		// 检查是否在地址池范围内
-		if !p.ipv4Pool.Contains(current) {
-			return netip.Addr{}, fmt.Errorf("ipv4 pool exhausted")
-		}
-
-		// 检查是否已分配
+	if !current.IsValid() {
+		return netip.Addr{}, fmt.Errorf("ipv4 pool exhausted")
+	}
+	for p.ipv4Pool.Contains(current) {
 		if _, exists := p.allocatedIPv4[current]; !exists {
-			// 分配这个 IP
 			p.allocatedIPv4[current] = sessionID
+			p.sessionIPv4[sessionID] = current
 			p.nextIPv4 = current.Next()
 			return current, nil
 		}
-
-		// 尝试下一个 IP
 		current = current.Next()
-
-		// 防止无限循环
-		if current == poolEnd {
-			return netip.Addr{}, fmt.Errorf("ipv4 pool exhausted")
-		}
 	}
+	return netip.Addr{}, fmt.Errorf("ipv4 pool exhausted")
 }
 
 // allocateIPv6 分配一个 IPv6 地址
 func (p *IPPool) allocateIPv6(sessionID string) (netip.Addr, error) {
-	// 从 nextIPv6 开始查找可用 IP
+	if addr, ok := p.popFreeIPv6Locked(); ok {
+		p.allocatedIPv6[addr] = sessionID
+		p.sessionIPv6[sessionID] = addr
+		return addr, nil
+	}
+
 	current := p.nextIPv6
-	poolEnd := p.ipv6Pool.Masked().Addr()
-
-	for {
-		// 检查是否在地址池范围内
-		if !p.ipv6Pool.Contains(current) {
-			return netip.Addr{}, fmt.Errorf("ipv6 pool exhausted")
-		}
-
-		// 检查是否已分配
+	if !current.IsValid() {
+		return netip.Addr{}, fmt.Errorf("ipv6 pool exhausted")
+	}
+	for p.ipv6Pool.Contains(current) {
 		if _, exists := p.allocatedIPv6[current]; !exists {
-			// 分配这个 IP
 			p.allocatedIPv6[current] = sessionID
+			p.sessionIPv6[sessionID] = current
 			p.nextIPv6 = current.Next()
 			return current, nil
 		}
-
-		// 尝试下一个 IP
 		current = current.Next()
-
-		// 防止无限循环（简化检查）
-		if current == poolEnd {
-			return netip.Addr{}, fmt.Errorf("ipv6 pool exhausted")
-		}
 	}
+	return netip.Addr{}, fmt.Errorf("ipv6 pool exhausted")
+}
+
+func (p *IPPool) popFreeIPv4Locked() (netip.Addr, bool) {
+	for len(p.freeIPv4) > 0 {
+		idx := len(p.freeIPv4) - 1
+		addr := p.freeIPv4[idx]
+		p.freeIPv4 = p.freeIPv4[:idx]
+		if !p.ipv4Pool.Contains(addr) {
+			continue
+		}
+		if _, exists := p.allocatedIPv4[addr]; exists {
+			continue
+		}
+		return addr, true
+	}
+	return netip.Addr{}, false
+}
+
+func (p *IPPool) popFreeIPv6Locked() (netip.Addr, bool) {
+	for len(p.freeIPv6) > 0 {
+		idx := len(p.freeIPv6) - 1
+		addr := p.freeIPv6[idx]
+		p.freeIPv6 = p.freeIPv6[:idx]
+		if !p.ipv6Pool.Contains(addr) {
+			continue
+		}
+		if _, exists := p.allocatedIPv6[addr]; exists {
+			continue
+		}
+		return addr, true
+	}
+	return netip.Addr{}, false
 }
 
 // ReleaseIP 释放会话的 IP 地址
@@ -151,18 +189,23 @@ func (p *IPPool) ReleaseIP(sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 释放 IPv4
-	for ip, sid := range p.allocatedIPv4 {
-		if sid == sessionID {
-			delete(p.allocatedIPv4, ip)
-		}
-	}
+	p.releaseIPv4Locked(sessionID)
+	p.releaseIPv6Locked(sessionID)
+}
 
-	// 释放 IPv6
-	for ip, sid := range p.allocatedIPv6 {
-		if sid == sessionID {
-			delete(p.allocatedIPv6, ip)
-		}
+func (p *IPPool) releaseIPv4Locked(sessionID string) {
+	if ip, ok := p.sessionIPv4[sessionID]; ok {
+		delete(p.sessionIPv4, sessionID)
+		delete(p.allocatedIPv4, ip)
+		p.freeIPv4 = append(p.freeIPv4, ip)
+	}
+}
+
+func (p *IPPool) releaseIPv6Locked(sessionID string) {
+	if ip, ok := p.sessionIPv6[sessionID]; ok {
+		delete(p.sessionIPv6, sessionID)
+		delete(p.allocatedIPv6, ip)
+		p.freeIPv6 = append(p.freeIPv6, ip)
 	}
 }
 
@@ -171,22 +214,8 @@ func (p *IPPool) GetAllocatedIPs(sessionID string) (ipv4, ipv6 netip.Addr) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 查找 IPv4
-	for ip, sid := range p.allocatedIPv4 {
-		if sid == sessionID {
-			ipv4 = ip
-			break
-		}
-	}
-
-	// 查找 IPv6
-	for ip, sid := range p.allocatedIPv6 {
-		if sid == sessionID {
-			ipv6 = ip
-			break
-		}
-	}
-
+	ipv4 = p.sessionIPv4[sessionID]
+	ipv6 = p.sessionIPv6[sessionID]
 	return ipv4, ipv6
 }
 
@@ -196,20 +225,20 @@ func (p *IPPool) Stats() IPPoolStats {
 	defer p.mu.Unlock()
 
 	return IPPoolStats{
-		IPv4PoolSize:      p.ipv4Pool.Bits(),
-		IPv4Allocated:     len(p.allocatedIPv4),
-		IPv6PoolSize:      p.ipv6Pool.Bits(),
-		IPv6Allocated:     len(p.allocatedIPv6),
-		TotalSessions:     p.countUniqueSessions(),
+		IPv4PoolSize:  p.ipv4Pool.Bits(),
+		IPv4Allocated: len(p.allocatedIPv4),
+		IPv6PoolSize:  p.ipv6Pool.Bits(),
+		IPv6Allocated: len(p.allocatedIPv6),
+		TotalSessions: p.countUniqueSessions(),
 	}
 }
 
 func (p *IPPool) countUniqueSessions() int {
-	sessions := make(map[string]struct{})
-	for _, sid := range p.allocatedIPv4 {
+	sessions := make(map[string]struct{}, len(p.sessionIPv4)+len(p.sessionIPv6))
+	for sid := range p.sessionIPv4 {
 		sessions[sid] = struct{}{}
 	}
-	for _, sid := range p.allocatedIPv6 {
+	for sid := range p.sessionIPv6 {
 		sessions[sid] = struct{}{}
 	}
 	return len(sessions)

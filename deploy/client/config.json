@@ -1,0 +1,27 @@
+{
+  "tun": {
+    "name": "tun0",
+    "mtu": 1420
+  },
+  "tls": {
+    "cert":        "/etc/connect-ip-tunnel/certs/client.crt",
+    "key":         "/etc/connect-ip-tunnel/certs/client.key",
+    "ca":          "/etc/connect-ip-tunnel/certs/ca.crt",
+    "server_name": "server.connect-ip.local"
+  },
+  "http3": {
+    "enable_datagrams": true,
+    "max_idle_timeout": "30s",
+    "keep_alive_period": "10s"
+  },
+  "connect_ip": {
+    "addr":      "server:443",
+    "uri":       "/.well-known/masque/ip/{target}/{ip_proto}/",
+    "authority": "server.connect-ip.local",
+    "wait_for_address_assign": true,
+    "address_assign_timeout": "30s",
+    "enable_reconnect": true,
+    "max_reconnect_delay": "30s",
+    "num_sessions": 1
+  }
+}

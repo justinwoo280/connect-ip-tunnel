@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 
+	"connect-ip-tunnel/observability"
 	"connect-ip-tunnel/option"
 	"connect-ip-tunnel/platform/tun"
 	securitytls "connect-ip-tunnel/security/tls"
 
 	"github.com/quic-go/quic-go"
 	qhttp3 "github.com/quic-go/quic-go/http3"
+	"github.com/yosida95/uritemplate/v3"
 )
 
 var ErrNotImplemented = errors.New("server: not implemented")
@@ -26,12 +29,15 @@ type Server struct {
 	tunConfigurator tun.Configurator
 	tunIfName       string
 	routingMgr      *RoutingManager
-	ipPool          *IPPool // IP 地址池管理
-	dispatcher      *PacketDispatcher // TUN 包分发器
+	ipPool          *IPPool               // IP 地址池管理
+	dispatcher      *PacketDispatcher     // TUN 包分发器
 	dispatchCancel  context.CancelFunc
+	uriTemplate     *uritemplate.Template // 缓存的 URI template
+	metrics         *observability.Metrics
 
-	listener   *quic.Listener
-	httpServer *qhttp3.Server
+	listener    *quic.Listener
+	httpServer  *qhttp3.Server
+	adminServer *http.Server // 管理/metrics HTTP 服务
 
 	sessions   map[string]*Session // sessionID -> Session
 	sessionsMu sync.RWMutex
@@ -46,9 +52,14 @@ func New(cfg option.ServerConfig) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	tmpl, err := uritemplate.New(cfg.URITemplate)
+	if err != nil {
+		return nil, fmt.Errorf("server: invalid uri template: %w", err)
+	}
 	return &Server{
-		cfg:      cfg,
-		sessions: make(map[string]*Session),
+		cfg:         cfg,
+		sessions:    make(map[string]*Session),
+		uriTemplate: tmpl,
 	}, nil
 }
 
@@ -188,6 +199,31 @@ func (s *Server) Start() error {
 			}
 		}()
 
+		// 6. 启动 Prometheus metrics / 管理 HTTP 端点
+		if s.cfg.AdminListen != "" {
+			m := observability.InitMetrics("connect_ip_tunnel")
+			s.metrics = m
+
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", m.Handler())
+			mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			})
+			s.RegisterAPIRoutes(mux)
+
+			s.adminServer = &http.Server{
+				Addr:    s.cfg.AdminListen,
+				Handler: mux,
+			}
+			go func() {
+				log.Printf("[server] admin/metrics listening on %s", s.cfg.AdminListen)
+				if err := s.adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("[server] admin server error: %v", err)
+				}
+			}()
+		}
+
 		s.started = true
 		log.Printf("[server] started: listen=%s tun=%s", s.cfg.Listen, ifName)
 	})
@@ -205,22 +241,21 @@ func (s *Server) Start() error {
 func (s *Server) Close() error {
 	var closeErr error
 	s.closeOnce.Do(func() {
-		// 停止分发器
-		if s.dispatchCancel != nil {
-			s.dispatchCancel()
-		}
+		// 关闭顺序说明：
+		// 1. 先关闭 HTTP/3 server 和 QUIC listener，让新连接无法进入，
+		//    并触发已有 handler goroutine 的 context 取消，
+		//    由 handler 的 defer 自行完成 UnregisterSession / ReleaseIP / session.Close。
+		// 2. 停止 dispatcher，确保 TUN 读循环退出。
+		// 3. 最后清理系统资源（路由、TUN）。
+		//
+		// 不在 Close 中重复调用 UnregisterSession/session.Close，
+		// 避免与 handler defer 并发双重清理。
 
-		// 关闭所有会话
-		s.sessionsMu.Lock()
-		for id, sess := range s.sessions {
-			if s.dispatcher != nil {
-				s.dispatcher.UnregisterSession(id)
+		if s.adminServer != nil {
+			if err := s.adminServer.Close(); err != nil && closeErr == nil {
+				closeErr = err
 			}
-			_ = sess.Close()
 		}
-		s.sessions = make(map[string]*Session)
-		s.sessionsMu.Unlock()
-
 		if s.httpServer != nil {
 			if err := s.httpServer.Close(); err != nil && closeErr == nil {
 				closeErr = err
@@ -231,6 +266,12 @@ func (s *Server) Close() error {
 				closeErr = err
 			}
 		}
+
+		// 停止分发器
+		if s.dispatchCancel != nil {
+			s.dispatchCancel()
+		}
+
 		// 清理路由配置
 		if s.routingMgr != nil {
 			if err := s.routingMgr.Teardown(s.cfg.EnableNAT, s.cfg.NATInterface); err != nil && closeErr == nil {

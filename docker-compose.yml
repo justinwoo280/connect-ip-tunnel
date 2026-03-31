@@ -1,0 +1,110 @@
+version: "3.9"
+
+# connect-ip-tunnel demo 环境
+#
+# 启动方式：
+#   1. 生成证书：make gen-certs（或手动，见 README）
+#   2. 复制配置：cp config.server.example.json deploy/server/config.json
+#               cp config.client.example.json deploy/client/config.json
+#   3. 启动：docker compose up
+#
+# Prometheus 指标：http://localhost:9090/metrics
+# 管理 API：      http://localhost:9090/api/v1/sessions
+
+services:
+  # ── 服务端 ──────────────────────────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: connect-ip-server
+    command: ["server", "--config", "/etc/connect-ip-tunnel/config.json"]
+    cap_add:
+      - NET_ADMIN      # 创建 TUN 设备
+      - SYS_MODULE     # 加载内核模块（部分系统需要）
+    devices:
+      - /dev/net/tun   # TUN 设备
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    volumes:
+      - ./deploy/server/config.json:/etc/connect-ip-tunnel/config.json:ro
+      - ./deploy/certs:/etc/connect-ip-tunnel/certs:ro
+    ports:
+      - "443:443/udp"   # QUIC/HTTP3
+      - "9090:9090/tcp" # 管理 API / Prometheus
+    networks:
+      tunnel-net:
+        ipv4_address: 172.20.0.10
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ── 客户端 ──────────────────────────────────────────────────────────────────
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: connect-ip-client
+    command: ["client", "--config", "/etc/connect-ip-tunnel/config.json"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      - ./deploy/client/config.json:/etc/connect-ip-tunnel/config.json:ro
+      - ./deploy/certs:/etc/connect-ip-tunnel/certs:ro
+    networks:
+      tunnel-net:
+        ipv4_address: 172.20.0.20
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Prometheus（可选，demo 用）──────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: connect-ip-prometheus
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090/tcp"
+    networks:
+      - tunnel-net
+    depends_on:
+      - server
+    profiles:
+      - monitoring  # docker compose --profile monitoring up 才会启动
+
+  # ── Grafana（可选，demo 用）──────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: connect-ip-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_SECURITY_ADMIN_PASSWORD=demo
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000/tcp"
+    networks:
+      - tunnel-net
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+networks:
+  tunnel-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

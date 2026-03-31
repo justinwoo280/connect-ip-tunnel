@@ -1,0 +1,24 @@
+{
+  "listen": "0.0.0.0:443",
+  "uri_template": "/.well-known/masque/ip/{target}/{ip_proto}/",
+  "admin_listen": "0.0.0.0:9090",
+  "tun": {
+    "name": "tun0",
+    "mtu": 1420
+  },
+  "tls": {
+    "cert": "/etc/connect-ip-tunnel/certs/server.crt",
+    "key":  "/etc/connect-ip-tunnel/certs/server.key",
+    "ca":   "/etc/connect-ip-tunnel/certs/ca.crt",
+    "client_auth": true
+  },
+  "http3": {
+    "enable_datagrams": true,
+    "max_idle_timeout": "30s",
+    "keep_alive_period": "10s"
+  },
+  "ipv4_pool": "10.233.0.0/16",
+  "ipv6_pool": "fd00::/64",
+  "enable_nat": true,
+  "nat_interface": ""
+}

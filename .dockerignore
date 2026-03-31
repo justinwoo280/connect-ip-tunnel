@@ -1,0 +1,24 @@
+# 构建产物
+bin/
+*.test
+*.out
+
+# 开发工具
+.git/
+.github/
+.vscode/
+.idea/
+
+# 部署配置（含证书，不打进镜像）
+deploy/
+
+# 文档
+*.md
+docs/
+
+# 测试覆盖率
+coverage.out
+coverage.html
+
+# 临时文件
+tmp_rovodev_*

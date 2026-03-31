@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"connect-ip-tunnel/common/bufferpool"
 	"connect-ip-tunnel/platform/tun"
@@ -73,8 +74,23 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 		bufSize = 65535
 	}
 
-	errCh := make(chan error, 2)
+	pumpCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
+	var closeTunnelOnce sync.Once
+	signalErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+		cancel()
+		closeTunnelOnce.Do(func() {
+			_ = p.Tunnel.Close()
+		})
+	}
+
 	wg.Add(2)
 
 	// TUN → Tunnel
@@ -88,14 +104,17 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pumpCtx.Done():
 				return
 			default:
 			}
 
 			n, err := dev.Read(bufs, sizes, 0)
 			if err != nil {
-				errCh <- fmt.Errorf("packet pump tun->tunnel read: %w", err)
+				if pumpCtx.Err() != nil {
+					return
+				}
+				signalErr(fmt.Errorf("packet pump tun->tunnel read: %w", err))
 				return
 			}
 
@@ -105,8 +124,8 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 				}
 				if err := p.Tunnel.WritePacket(bufs[i][:sizes[i]]); err != nil {
 					p.stats.Drops.Add(1)
-					// 单包失败不中断整个批次
-					continue
+					signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
+					return
 				}
 				p.stats.TxPackets.Add(1)
 				p.stats.TxBytes.Add(uint64(sizes[i]))
@@ -122,14 +141,17 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pumpCtx.Done():
 				return
 			default:
 			}
 
 			n, err := p.Tunnel.ReadPacket(buf)
 			if err != nil {
-				errCh <- fmt.Errorf("packet pump tunnel->tun read: %w", err)
+				if pumpCtx.Err() != nil {
+					return
+				}
+				signalErr(fmt.Errorf("packet pump tunnel->tun read: %w", err))
 				return
 			}
 			if n <= 0 {
@@ -139,7 +161,7 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 			// 单包写入（Tunnel 侧暂不支持批量）
 			if err := p.Dev.WritePacket(buf[:n]); err != nil {
 				p.stats.Drops.Add(1)
-				errCh <- fmt.Errorf("packet pump tunnel->tun write: %w", err)
+				signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
 				return
 			}
 
@@ -150,10 +172,15 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 
 	select {
 	case <-ctx.Done():
-		wg.Wait()
+		cancel()
+		if !waitWithTimeout(&wg, 2*time.Second) {
+			return ctx.Err()
+		}
 		return ctx.Err()
 	case err := <-errCh:
-		wg.Wait()
+		if !waitWithTimeout(&wg, 2*time.Second) {
+			return fmt.Errorf("%w (peer goroutine did not exit before timeout)", err)
+		}
 		return err
 	}
 }
@@ -165,8 +192,23 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 		bufSize = 65535
 	}
 
-	errCh := make(chan error, 2)
+	pumpCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
+	var closeTunnelOnce sync.Once
+	signalErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+		cancel()
+		closeTunnelOnce.Do(func() {
+			_ = p.Tunnel.Close()
+		})
+	}
+
 	wg.Add(2)
 
 	// TUN → Tunnel
@@ -177,14 +219,17 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pumpCtx.Done():
 				return
 			default:
 			}
 
 			n, err := p.Dev.ReadPacket(buf)
 			if err != nil {
-				errCh <- fmt.Errorf("packet pump tun->tunnel read: %w", err)
+				if pumpCtx.Err() != nil {
+					return
+				}
+				signalErr(fmt.Errorf("packet pump tun->tunnel read: %w", err))
 				return
 			}
 			if n <= 0 {
@@ -193,7 +238,7 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 			if err := p.Tunnel.WritePacket(buf[:n]); err != nil {
 				p.stats.Drops.Add(1)
-				errCh <- fmt.Errorf("packet pump tun->tunnel write: %w", err)
+				signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
 				return
 			}
 
@@ -210,14 +255,17 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pumpCtx.Done():
 				return
 			default:
 			}
 
 			n, err := p.Tunnel.ReadPacket(buf)
 			if err != nil {
-				errCh <- fmt.Errorf("packet pump tunnel->tun read: %w", err)
+				if pumpCtx.Err() != nil {
+					return
+				}
+				signalErr(fmt.Errorf("packet pump tunnel->tun read: %w", err))
 				return
 			}
 			if n <= 0 {
@@ -226,7 +274,7 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 			if err := p.Dev.WritePacket(buf[:n]); err != nil {
 				p.stats.Drops.Add(1)
-				errCh <- fmt.Errorf("packet pump tunnel->tun write: %w", err)
+				signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
 				return
 			}
 
@@ -237,10 +285,30 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		wg.Wait()
+		cancel()
+		if !waitWithTimeout(&wg, 2*time.Second) {
+			return ctx.Err()
+		}
 		return ctx.Err()
 	case err := <-errCh:
-		wg.Wait()
+		if !waitWithTimeout(&wg, 2*time.Second) {
+			return fmt.Errorf("%w (peer goroutine did not exit before timeout)", err)
+		}
 		return err
+	}
+}
+
+func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }

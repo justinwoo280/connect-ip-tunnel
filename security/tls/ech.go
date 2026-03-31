@@ -9,6 +9,7 @@ import (
 "errors"
 "fmt"
 "io"
+"math"
 "net"
 "net/http"
 "net/url"
@@ -132,6 +133,8 @@ return
 }()
 }
 
+const maxDOHResponseSize = 64 * 1024
+
 type dohClient struct {
 serverURL  string
 httpClient *http.Client
@@ -180,7 +183,10 @@ Timeout:   10 * time.Second,
 }
 
 func (c *dohClient) queryECH(domain string) ([]byte, error) {
-query := buildDNSQuery(domain, 65)
+query, err := buildDNSQuery(domain, 65)
+if err != nil {
+return nil, err
+}
 req, err := http.NewRequest(http.MethodPost, c.serverURL, bytes.NewReader(query))
 if err != nil {
 return nil, fmt.Errorf("doh: build request: %w", err)
@@ -195,9 +201,12 @@ defer resp.Body.Close()
 if resp.StatusCode != http.StatusOK {
 return nil, fmt.Errorf("doh: server returned %d", resp.StatusCode)
 }
-body, err := io.ReadAll(resp.Body)
+body, err := io.ReadAll(io.LimitReader(resp.Body, maxDOHResponseSize+1))
 if err != nil {
 return nil, fmt.Errorf("doh: read response: %w", err)
+}
+if len(body) > maxDOHResponseSize {
+return nil, fmt.Errorf("doh: response exceeds %d bytes", maxDOHResponseSize)
 }
 echB64, err := parseDNSResponseForECH(body)
 if err != nil {
@@ -210,101 +219,142 @@ return nil, fmt.Errorf("doh: decode ech base64: %w", err)
 return echList, nil
 }
 
-func buildDNSQuery(domain string, qtype uint16) []byte {
+func buildDNSQuery(domain string, qtype uint16) ([]byte, error) {
+domain = strings.TrimSuffix(domain, ".")
+if domain == "" {
+return nil, errors.New("doh: empty domain")
+}
+if len(domain) > 253 {
+return nil, errors.New("doh: domain name too long")
+}
+
 var q []byte
 q = append(q, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-labels := []byte(domain)
-start := 0
-for i, b := range labels {
-if b == '.' {
-q = append(q, byte(i-start))
-q = append(q, labels[start:i]...)
-start = i + 1
+for _, label := range strings.Split(domain, ".") {
+if label == "" {
+return nil, errors.New("doh: domain contains empty label")
 }
+if len(label) > 63 {
+return nil, fmt.Errorf("doh: domain label %q too long", label)
 }
-if start < len(labels) {
-q = append(q, byte(len(labels)-start))
-q = append(q, labels[start:]...)
+if len(label) > math.MaxUint8 {
+return nil, fmt.Errorf("doh: domain label %q length overflows dns encoding", label)
+}
+q = append(q, byte(len(label)))
+q = append(q, label...)
 }
 q = append(q, 0x00)
 var qtb [2]byte
 binary.BigEndian.PutUint16(qtb[:], qtype)
 q = append(q, qtb[:]...)
 q = append(q, 0x00, 0x01)
-return q
+return q, nil
 }
 
 func parseDNSResponseForECH(resp []byte) (string, error) {
 if len(resp) < 12 {
 return "", errors.New("doh: response too short")
 }
-answerCount := int(resp[6])<<8 | int(resp[7])
+answerCount := int(binary.BigEndian.Uint16(resp[6:8]))
 if answerCount == 0 {
 return "", errors.New("doh: no answers")
 }
-offset := 12
-for offset < len(resp) {
-if resp[offset] == 0 {
-offset += 5
-break
+
+offset, err := skipDNSName(resp, 12)
+if err != nil {
+return "", err
 }
-if resp[offset]&0xC0 == 0xC0 {
-offset += 6
-break
+if offset+4 > len(resp) {
+return "", errors.New("doh: truncated question")
 }
-offset += int(resp[offset]) + 1
-}
-for i := 0; i < answerCount && offset < len(resp); i++ {
-if offset+2 > len(resp) {
-break
-}
-if resp[offset]&0xC0 == 0xC0 {
-offset += 2
-} else {
-for offset < len(resp) && resp[offset] != 0 {
-offset += int(resp[offset]) + 1
-}
-offset++
-}
-if offset+10 > len(resp) {
-break
-}
-rtype := uint16(resp[offset])<<8 | uint16(resp[offset+1])
-rdlen := int(resp[offset+8])<<8 | int(resp[offset+9])
-offset += 10
-if offset+rdlen > len(resp) {
-break
-}
-if rtype == 65 {
-if rdlen < 3 {
-offset += rdlen
-continue
-}
-dp := offset + 2
-for dp < offset+rdlen && resp[dp] != 0 {
-if resp[dp]&0xC0 == 0xC0 {
-dp += 2
-break
-}
-dp += int(resp[dp]) + 1
-}
-if dp < offset+rdlen {
-dp++
-}
-for dp+4 <= offset+rdlen {
-key := uint16(resp[dp])<<8 | uint16(resp[dp+1])
-plen := int(resp[dp+2])<<8 | int(resp[dp+3])
-dp += 4
-if dp+plen > offset+rdlen {
-break
-}
-if key == 5 {
-return base64.StdEncoding.EncodeToString(resp[dp : dp+plen]), nil
-}
-dp += plen
-}
-}
-offset += rdlen
+offset += 4 // qtype + qclass
+
+for i := 0; i < answerCount; i++ {
+	offset, err = skipDNSName(resp, offset)
+	if err != nil {
+		return "", err
+	}
+	if offset+10 > len(resp) {
+		return "", errors.New("doh: truncated resource record header")
+	}
+	rtype := binary.BigEndian.Uint16(resp[offset : offset+2])
+	rdlen := int(binary.BigEndian.Uint16(resp[offset+8 : offset+10]))
+	offset += 10
+	if offset+rdlen > len(resp) {
+		return "", errors.New("doh: truncated resource record data")
+	}
+	if rtype == 65 {
+		echB64, err := parseHTTPSRecordForECH(resp[offset : offset+rdlen])
+		if err == nil {
+			return echB64, nil
+		}
+	}
+	offset += rdlen
 }
 return "", errors.New("doh: no ECH parameter in HTTPS record")
+}
+
+func skipDNSName(msg []byte, offset int) (int, error) {
+	steps := 0
+	for {
+		if offset >= len(msg) {
+			return 0, errors.New("doh: truncated dns name")
+		}
+		if steps > len(msg) {
+			return 0, errors.New("doh: invalid dns name compression loop")
+		}
+		steps++
+
+		length := msg[offset]
+		switch {
+		case length == 0:
+			return offset + 1, nil
+		case length&0xC0 == 0xC0:
+			if offset+1 >= len(msg) {
+				return 0, errors.New("doh: truncated dns compression pointer")
+			}
+			return offset + 2, nil
+		case length&0xC0 != 0:
+			return 0, errors.New("doh: invalid dns label encoding")
+		default:
+			if length > 63 {
+				return 0, errors.New("doh: dns label too long")
+			}
+			offset++
+			if offset+int(length) > len(msg) {
+				return 0, errors.New("doh: truncated dns label")
+			}
+			offset += int(length)
+		}
+	}
+}
+
+func parseHTTPSRecordForECH(rdata []byte) (string, error) {
+	if len(rdata) < 3 {
+		return "", errors.New("doh: https record too short")
+	}
+	offset := 2 // priority
+	next, err := skipDNSName(rdata, offset)
+	if err != nil {
+		return "", err
+	}
+	offset = next
+	for {
+		if offset == len(rdata) {
+			return "", errors.New("doh: no ECH parameter in HTTPS record")
+		}
+		if offset+4 > len(rdata) {
+			return "", errors.New("doh: truncated https svcparam header")
+		}
+		key := binary.BigEndian.Uint16(rdata[offset : offset+2])
+		plen := int(binary.BigEndian.Uint16(rdata[offset+2 : offset+4]))
+		offset += 4
+		if offset+plen > len(rdata) {
+			return "", errors.New("doh: truncated https svcparam value")
+		}
+		if key == 5 {
+			return base64.StdEncoding.EncodeToString(rdata[offset : offset+plen]), nil
+		}
+		offset += plen
+	}
 }

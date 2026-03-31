@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 
 	bypass "connect-ip-tunnel/platform/bypass"
 	securitytls "connect-ip-tunnel/security/tls"
@@ -19,21 +20,20 @@ type ClientFactory interface {
 }
 
 type Factory struct {
-	opts       Options
-	tlsProv    securitytls.Provider
-	tlsOptions securitytls.ClientOptions
-	bypass     bypass.Dialer
+	opts      Options
+	tlsClient securitytls.ClientConfig
+	bypass    bypass.Dialer
 
-	transport  *qhttp3.Transport
-	roundTrip  http.RoundTripper // 可选的自定义 RoundTripper（用于注入鉴权等）
+	mu        sync.Mutex
+	transport *qhttp3.Transport
+	roundTrip http.RoundTripper // 可选的自定义 RoundTripper（用于注入鉴权等）
 }
 
-func NewFactory(opts Options, tlsProv securitytls.Provider, tlsOptions securitytls.ClientOptions, bp bypass.Dialer) *Factory {
+func NewFactory(opts Options, tlsClient securitytls.ClientConfig, bp bypass.Dialer) *Factory {
 	return &Factory{
-		opts:       opts,
-		tlsProv:    tlsProv,
-		tlsOptions: tlsOptions,
-		bypass:     bp,
+		opts:      opts,
+		tlsClient: tlsClient,
+		bypass:    bp,
 	}
 }
 
@@ -45,12 +45,7 @@ func (f *Factory) SetRoundTripper(rt http.RoundTripper) {
 // Dial 建立到 target 的 QUIC 连接并返回 HTTP/3 ClientConn。
 // 若配置了 bypass dialer，使用它建 UDP socket 以绕过 TUN；否则直接 DialAddr。
 func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, error) {
-	tlsClient, err := f.tlsProv.NewClient(ctx, f.tlsOptions)
-	if err != nil {
-		return nil, fmt.Errorf("http3: build tls config: %w", err)
-	}
-
-	tlsCfg := tlsClient.TLSConfig().Clone()
+	tlsCfg := f.tlsClient.TLSConfig().Clone()
 	if target.ServerName != "" {
 		tlsCfg.ServerName = target.ServerName
 	}
@@ -58,6 +53,7 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 	quicCfg := buildQUICConfig(f.opts)
 
 	var quicConn *quic.Conn
+	var err error
 	if f.bypass != nil {
 		pc, err := f.bypass.ListenPacket(ctx, "udp", "")
 		if err != nil {
@@ -71,28 +67,36 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 		quicConn, err = quic.Dial(ctx, pc, udpAddr, tlsCfg, quicCfg)
 		if err != nil {
 			_ = pc.Close()
-			_, _ = tlsClient.HandleHandshakeError(err)
+			_, _ = f.tlsClient.HandleHandshakeError(err)
 			return nil, fmt.Errorf("http3: quic dial (bypass): %w", err)
 		}
 	} else {
 		quicConn, err = quic.DialAddr(ctx, target.Addr, tlsCfg, quicCfg)
 		if err != nil {
-			_, _ = tlsClient.HandleHandshakeError(err)
+			_, _ = f.tlsClient.HandleHandshakeError(err)
 			return nil, fmt.Errorf("http3: quic dial: %w", err)
 		}
 	}
 
-	t := &qhttp3.Transport{
-		EnableDatagrams: f.opts.EnableDatagrams,
+	f.mu.Lock()
+	if f.transport == nil {
+		f.transport = &qhttp3.Transport{
+			EnableDatagrams: f.opts.EnableDatagrams,
+		}
 	}
-	f.transport = t
+	t := f.transport
+	f.mu.Unlock()
 
 	return t.NewClientConn(quicConn), nil
 }
 
 func (f *Factory) Close() error {
-	if f.transport != nil {
-		return f.transport.Close()
+	f.mu.Lock()
+	t := f.transport
+	f.transport = nil
+	f.mu.Unlock()
+	if t != nil {
+		return t.Close()
 	}
 	return nil
 }

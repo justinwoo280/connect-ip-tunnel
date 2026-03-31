@@ -40,6 +40,10 @@ type windowsDevice struct {
 	dev       wgtun.Device
 	mtu       int
 	closeOnce sync.Once
+
+	// 单包模式缓存，避免热路径分配
+	singleBufs  [][]byte
+	singleSizes []int
 }
 
 func (d *windowsDevice) Name() (string, error) {
@@ -57,24 +61,30 @@ func (d *windowsDevice) ReadPacket(buf []byte) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	buffs := [][]byte{buf}
-	sizes := make([]int, 1)
-	n, err := d.dev.Read(buffs, sizes, 0)
+	if d.singleBufs == nil {
+		d.singleBufs = make([][]byte, 1)
+		d.singleSizes = make([]int, 1)
+	}
+	d.singleBufs[0] = buf
+	n, err := d.dev.Read(d.singleBufs, d.singleSizes, 0)
 	if err != nil {
 		return 0, err
 	}
 	if n <= 0 {
 		return 0, nil
 	}
-	return sizes[0], nil
+	return d.singleSizes[0], nil
 }
 
 func (d *windowsDevice) WritePacket(pkt []byte) error {
 	if len(pkt) == 0 {
 		return nil
 	}
-	buffs := [][]byte{pkt}
-	n, err := d.dev.Write(buffs, 0)
+	if d.singleBufs == nil {
+		d.singleBufs = make([][]byte, 1)
+	}
+	d.singleBufs[0] = pkt
+	n, err := d.dev.Write(d.singleBufs, 0)
 	if err != nil {
 		return err
 	}

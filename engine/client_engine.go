@@ -19,6 +19,9 @@ import (
 	"connect-ip-tunnel/tunnel/connectip"
 )
 
+// 编译时验证 MultiSessionPool 相关类型已注册
+var _ = (*MultiSessionPool)(nil)
+
 var ErrNotImplemented = errors.New("engine: not implemented")
 
 // Engine 负责组装平台层、传输层与数据面 runner（客户端模式）。
@@ -109,7 +112,7 @@ func (e *Engine) Start() error {
 			}
 		}
 
-		// 5. 构建 HTTP/3 工厂
+		// 5. 构建 HTTP/3 工厂（复用已构建的 tlsClient，避免重复加载证书）
 		h3Opts := h3transport.Options{
 			EnableDatagrams:                e.cfg.HTTP3.EnableDatagrams,
 			MaxIdleTimeout:                 e.cfg.HTTP3.MaxIdleTimeout,
@@ -121,8 +124,7 @@ func (e *Engine) Start() error {
 			InitialConnectionReceiveWindow: uint64(e.cfg.HTTP3.InitialConnWindow),
 			MaxConnectionReceiveWindow:     uint64(e.cfg.HTTP3.MaxConnWindow),
 		}
-		tlsProvider2 := securitytls.NewProvider()
-		e.h3Factory = h3transport.NewFactory(h3Opts, tlsProvider2, e.buildTLSOptions(), e.bpDialer)
+		e.h3Factory = h3transport.NewFactory(h3Opts, e.tlsClient, e.bpDialer)
 
 		// 6. 启动连接循环
 		ctx, cancel := context.WithCancel(context.Background())
@@ -149,7 +151,10 @@ func (e *Engine) runLoop(ctx context.Context) {
 	defer close(e.loopDone)
 
 	backoff := time.Second
-	const maxBackoff = 30 * time.Second
+	const (
+		maxBackoff              = 30 * time.Second
+		stableConnectionResetAt = 30 * time.Second
+	)
 
 	for {
 		select {
@@ -158,9 +163,13 @@ func (e *Engine) runLoop(ctx context.Context) {
 		default:
 		}
 
+		startedAt := time.Now()
 		err := e.connectAndRun(ctx)
 		if err == nil || ctx.Err() != nil {
 			return
+		}
+		if time.Since(startedAt) >= stableConnectionResetAt {
+			backoff = time.Second
 		}
 
 		log.Printf("[engine] session ended: %v", err)
@@ -192,16 +201,23 @@ func (e *Engine) runLoop(ctx context.Context) {
 }
 
 // connectAndRun 执行一次完整的 连接 → ADDRESS_ASSIGN → TUN 配置 → 数据转发 流程。
+// 当 cfg.ConnectIP.NumSessions > 1 时，并行建立多个 session 共享流量。
 func (e *Engine) connectAndRun(ctx context.Context) error {
-	// 1. 建立 CONNECT-IP 会话
+	n := e.cfg.ConnectIP.NumSessions
+	if n <= 1 {
+		return e.connectAndRunSingle(ctx)
+	}
+	return e.connectAndRunMulti(ctx, n)
+}
+
+// connectAndRunSingle 单 session 模式（开源版默认路径）。
+func (e *Engine) connectAndRunSingle(ctx context.Context) error {
 	cipClient := connectip.NewClient(e.h3Factory, e.tunDevice)
 	target := h3transport.Target{
 		Addr:       e.cfg.ConnectIP.Addr,
 		ServerName: e.cfg.TLS.ServerName,
 		Authority:  e.cfg.ConnectIP.Authority,
 	}
-
-	// 注：鉴权已由 TLS 层的 mTLS 完成，无需在 HTTP 层注入凭证
 
 	session, err := cipClient.Open(ctx, target, connectip.Options{
 		URI:       e.cfg.ConnectIP.URI,
@@ -214,33 +230,179 @@ func (e *Engine) connectAndRun(ctx context.Context) error {
 
 	log.Printf("[engine] connect-ip session established to %s", e.cfg.ConnectIP.Addr)
 
-	// 2. 等待 ADDRESS_ASSIGN 或使用静态配置
 	if e.cfg.ConnectIP.WaitForAddressAssign {
 		if err := e.waitAndConfigureTUN(ctx, session); err != nil {
 			return fmt.Errorf("engine: address assign: %w", err)
 		}
 	} else {
-		// 使用配置文件中的静态 IP
 		if err := e.configureTUNStatic(); err != nil {
 			return fmt.Errorf("engine: configure tun static: %w", err)
 		}
 	}
 
-	// 3. 启动数据面 pump
 	pump := &runner.PacketPump{
 		Dev:        e.tunDevice,
 		Tunnel:     session,
 		BufferSize: e.cfg.TUN.MTU + 4,
 	}
 
-	log.Printf("[engine] packet pump started")
+	log.Printf("[engine] packet pump started (single session)")
 	if err := pump.Run(ctx); err != nil {
 		if ctx.Err() != nil {
-			return nil // 正常关闭
+			return nil
 		}
 		return fmt.Errorf("engine: packet pump: %w", err)
 	}
 	return nil
+}
+
+// connectAndRunMulti 多 session 并行模式（企业版路径）。
+func (e *Engine) connectAndRunMulti(ctx context.Context, n int) error {
+	log.Printf("[engine] starting multi-session mode: n=%d target=%s", n, e.cfg.ConnectIP.Addr)
+
+	dialFn := func(ctx context.Context) (*connectip.Session, error) {
+		cipClient := connectip.NewClient(e.h3Factory, e.tunDevice)
+		target := h3transport.Target{
+			Addr:       e.cfg.ConnectIP.Addr,
+			ServerName: e.cfg.TLS.ServerName,
+			Authority:  e.cfg.ConnectIP.Authority,
+		}
+		return cipClient.Open(ctx, target, connectip.Options{
+			URI:       e.cfg.ConnectIP.URI,
+			Authority: e.cfg.ConnectIP.Authority,
+		})
+	}
+
+	pool, err := buildSessionsParallel(ctx, n, dialFn)
+	if err != nil {
+		return fmt.Errorf("engine: build session pool: %w", err)
+	}
+	defer func() { _ = pool.Close() }()
+
+	log.Printf("[engine] %d sessions established to %s", n, e.cfg.ConnectIP.Addr)
+
+	// ADDRESS_ASSIGN 只需等第一个 session 分配即可（服务端对所有 session 分配同一客户端 IP）
+	if e.cfg.ConnectIP.WaitForAddressAssign {
+		if err := e.waitAndConfigureTUN(ctx, pool.sessions[0]); err != nil {
+			return fmt.Errorf("engine: address assign: %w", err)
+		}
+	} else {
+		if err := e.configureTUNStatic(); err != nil {
+			return fmt.Errorf("engine: configure tun static: %w", err)
+		}
+	}
+
+	// 启动多路 pump：上行按 flow hash 分发，下行各 session 独立 goroutine
+	return e.runMultiSessionPump(ctx, pool)
+}
+
+// runMultiSessionPump 启动多 session 的双向数据转发。
+func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool) error {
+	pumpCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	bufSize := e.cfg.TUN.MTU + 4
+	if bufSize <= 4 {
+		bufSize = 65535
+	}
+
+	// 上行：TUN → flow hash → 对应 session
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, bufSize)
+		for {
+			select {
+			case <-pumpCtx.Done():
+				return
+			default:
+			}
+			n, err := e.tunDevice.ReadPacket(buf)
+			if err != nil {
+				if pumpCtx.Err() != nil {
+					return
+				}
+				select {
+				case errCh <- fmt.Errorf("multi pump tun read: %w", err):
+				default:
+				}
+				cancel()
+				return
+			}
+			if n <= 0 {
+				continue
+			}
+			if err := pool.WritePacket(buf[:n]); err != nil {
+				if pumpCtx.Err() != nil {
+					return
+				}
+				select {
+				case errCh <- fmt.Errorf("multi pump session write: %w", err):
+				default:
+				}
+				cancel()
+				return
+			}
+		}
+	}()
+
+	// 下行：各 session → TUN，每个 session 独立 goroutine
+	for i := 0; i < pool.SessionCount(); i++ {
+		idx := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, bufSize)
+			for {
+				select {
+				case <-pumpCtx.Done():
+					return
+				default:
+				}
+				n, err := pool.ReadFrom(idx, buf)
+				if err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
+					select {
+					case errCh <- fmt.Errorf("multi pump session[%d] read: %w", idx, err):
+					default:
+					}
+					cancel()
+					_ = pool.Close()
+					return
+				}
+				if n <= 0 {
+					continue
+				}
+				if err := e.tunDevice.WritePacket(buf[:n]); err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
+					select {
+					case errCh <- fmt.Errorf("multi pump tun write: %w", err):
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+
+	log.Printf("[engine] multi-session pump started (%d sessions)", pool.SessionCount())
+
+	select {
+	case <-ctx.Done():
+		cancel()
+		wg.Wait()
+		return nil
+	case err := <-errCh:
+		wg.Wait()
+		return err
+	}
 }
 
 // waitAndConfigureTUN 等待服务端的 ADDRESS_ASSIGN capsule，用分配的 IP 配置 TUN。
@@ -346,6 +508,9 @@ func (e *Engine) Close() error {
 			if err := e.tunDevice.Close(); err != nil && closeErr == nil {
 				closeErr = err
 			}
+		}
+		if e.echMgr != nil {
+			e.echMgr.Stop()
 		}
 		if e.tlsClient != nil {
 			if err := e.tlsClient.Close(); err != nil && closeErr == nil {

@@ -3,6 +3,7 @@ package server
 import (
 	"net/netip"
 	"sync/atomic"
+	"time"
 
 	"connect-ip-tunnel/platform/tun"
 
@@ -15,6 +16,7 @@ type Session struct {
 	conn       *connectipgo.Conn
 	dev        tun.Device
 	remoteAddr string
+	createdAt  time.Time
 
 	// 分配给客户端的 IP 地址
 	assignedIPv4 netip.Prefix
@@ -45,6 +47,7 @@ func newSessionWithIP(conn *connectipgo.Conn, dev tun.Device, remoteAddr, id str
 		conn:         conn,
 		dev:          dev,
 		remoteAddr:   remoteAddr,
+		createdAt:    time.Now(),
 		assignedIPv4: ipv4,
 		assignedIPv6: ipv6,
 	}
@@ -93,16 +96,9 @@ func (s *Session) Close() error {
 	return s.conn.Close()
 }
 
-// Stats 返回会话统计信息
-func (s *Session) Stats() SessionStats {
-	return SessionStats{
-		TxPackets:    s.txPackets.Load(),
-		RxPackets:    s.rxPackets.Load(),
-		TxBytes:      s.txBytes.Load(),
-		RxBytes:      s.rxBytes.Load(),
-		AssignedIPv4: s.assignedIPv4,
-		AssignedIPv6: s.assignedIPv6,
-	}
+// Stats 返回会话流量统计（rx bytes, tx bytes, rx packets, tx packets）。
+func (s *Session) Stats() (rxBytes, txBytes, rxPackets, txPackets uint64) {
+	return s.rxBytes.Load(), s.txBytes.Load(), s.rxPackets.Load(), s.txPackets.Load()
 }
 
 type SessionStats struct {

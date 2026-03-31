@@ -12,16 +12,25 @@ import (
 	"connect-ip-tunnel/server"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=<tag>"
+var Version = "dev"
+
 func main() {
 	configPath := flag.String("c", "", "config file path (JSON)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		log.Printf("connect-ip-tunnel %s", Version)
+		os.Exit(0)
+	}
 
 	cfg, err := option.LoadOrDefault(*configPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
 
-	log.Printf("connect-ip-tunnel starting in %s mode", cfg.Mode)
+	log.Printf("connect-ip-tunnel %s starting in %s mode", Version, cfg.Mode)
 
 	// 根据模式启动客户端或服务端
 	if cfg.Mode == option.ModeClient {

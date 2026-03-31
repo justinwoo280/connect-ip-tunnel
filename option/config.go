@@ -29,6 +29,7 @@ type ClientConfig struct {
 type ServerConfig struct {
 	Listen      string      `json:"listen"`       // 监听地址，例如 :443 或 0.0.0.0:443
 	URITemplate string      `json:"uri_template"` // URI 模板，例如 /.well-known/masque/ip
+	AdminListen string      `json:"admin_listen"` // 管理/metrics 端点监听地址，例如 127.0.0.1:9090（留空则不启动）
 	TUN         TUNConfig   `json:"tun"`
 	TLS         TLSConfig   `json:"tls"`
 	HTTP3       HTTP3Config `json:"http3"`
@@ -113,6 +114,11 @@ type ConnectIPConfig struct {
 	// 重连配置
 	EnableReconnect   bool          `json:"enable_reconnect"`    // 默认 true
 	MaxReconnectDelay time.Duration `json:"max_reconnect_delay"` // 默认 30s
+
+	// 多 session 并行（企业版特性，开源版固定为 1）
+	// 启用后客户端会并行建立 N 条 CONNECT-IP session，
+	// 按五元组哈希分发上行包，充分利用多核与多连接带宽。
+	NumSessions int `json:"num_sessions"` // 默认 1；建议设为 CPU 核数或带宽瓶颈数
 }
 
 
