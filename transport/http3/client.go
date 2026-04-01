@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 
 	bypass "connect-ip-tunnel/platform/bypass"
@@ -26,7 +25,6 @@ type Factory struct {
 
 	mu        sync.Mutex
 	transport *qhttp3.Transport
-	roundTrip http.RoundTripper // 可选的自定义 RoundTripper（用于注入鉴权等）
 }
 
 func NewFactory(opts Options, tlsClient securitytls.ClientConfig, bp bypass.Dialer) *Factory {
@@ -35,11 +33,6 @@ func NewFactory(opts Options, tlsClient securitytls.ClientConfig, bp bypass.Dial
 		tlsClient: tlsClient,
 		bypass:    bp,
 	}
-}
-
-// SetRoundTripper 设置自定义 RoundTripper（用于鉴权等场景）
-func (f *Factory) SetRoundTripper(rt http.RoundTripper) {
-	f.roundTrip = rt
 }
 
 // Dial 建立到 target 的 QUIC 连接并返回 HTTP/3 ClientConn。
@@ -114,28 +107,3 @@ func (f *Factory) Close() error {
 	return nil
 }
 
-// authRoundTripper 包装 RoundTripper 以注入鉴权信息
-type authRoundTripper struct {
-	base     http.RoundTripper
-	authFunc func(*http.Request) error
-}
-
-func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if a.authFunc != nil {
-		if err := a.authFunc(req); err != nil {
-			return nil, fmt.Errorf("auth: apply to request: %w", err)
-		}
-	}
-	return a.base.RoundTrip(req)
-}
-
-// NewAuthRoundTripper 创建带鉴权的 RoundTripper
-func NewAuthRoundTripper(base http.RoundTripper, authFunc func(*http.Request) error) http.RoundTripper {
-	if authFunc == nil {
-		return base
-	}
-	return &authRoundTripper{
-		base:     base,
-		authFunc: authFunc,
-	}
-}

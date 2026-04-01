@@ -2,12 +2,15 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connect-ip-tunnel/option"
@@ -44,6 +47,16 @@ type Engine struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 	started   bool
+
+	// admin HTTP server（GUI 统计接口）
+	adminServer *http.Server
+
+	// 统计（原子操作，pump goroutine 写，admin handler 读）
+	pump        atomic.Pointer[runner.PacketPump]
+	status      atomic.Value // string: "disconnected" / "connecting" / "connected"
+	assignedV4  atomic.Value // string: 分配的 IPv4 CIDR，例如 "10.0.0.2/24"
+	assignedV6  atomic.Value // string: 分配的 IPv6 CIDR
+	connectedAt atomic.Value // time.Time: 连接建立时间
 }
 
 func New(cfg option.ClientConfig) (*Engine, error) {
@@ -130,7 +143,16 @@ func (e *Engine) Start() error {
 		ctx, cancel := context.WithCancel(context.Background())
 		e.cancelLoop = cancel
 		e.loopDone = make(chan struct{})
+		e.status.Store("disconnected")
 		go e.runLoop(ctx)
+
+		// 7. 启动 admin HTTP server（若配置了监听地址）
+		if e.cfg.AdminListen != "" {
+			if err := e.startAdminServer(e.cfg.AdminListen); err != nil {
+				startErr = fmt.Errorf("engine: start admin server: %w", err)
+				return
+			}
+		}
 
 		e.started = true
 		log.Printf("[engine] started: tun=%s server=%s", ifName, e.cfg.ConnectIP.Addr)
@@ -219,14 +241,21 @@ func (e *Engine) connectAndRunSingle(ctx context.Context) error {
 		Authority:  e.cfg.ConnectIP.Authority,
 	}
 
+	e.status.Store("connecting")
 	session, err := cipClient.Open(ctx, target, connectip.Options{
 		URI:       e.cfg.ConnectIP.URI,
 		Authority: e.cfg.ConnectIP.Authority,
 	})
 	if err != nil {
+		e.status.Store("disconnected")
 		return fmt.Errorf("engine: open connectip session: %w", err)
 	}
-	defer func() { _ = session.Close() }()
+	defer func() {
+		_ = session.Close()
+		e.status.Store("disconnected")
+		e.assignedV4.Store("")
+		e.assignedV6.Store("")
+	}()
 
 	log.Printf("[engine] connect-ip session established to %s", e.cfg.ConnectIP.Addr)
 
@@ -240,11 +269,17 @@ func (e *Engine) connectAndRunSingle(ctx context.Context) error {
 		}
 	}
 
+	e.status.Store("connected")
+	now := time.Now()
+	e.connectedAt.Store(now)
+
 	pump := &runner.PacketPump{
 		Dev:        e.tunDevice,
 		Tunnel:     session,
 		BufferSize: e.cfg.TUN.MTU + 4,
 	}
+	e.pump.Store(pump)
+	defer e.pump.Store(nil)
 
 	log.Printf("[engine] packet pump started (single session)")
 	if err := pump.Run(ctx); err != nil {
@@ -432,9 +467,11 @@ func (e *Engine) waitAndConfigureTUN(ctx context.Context, session *connectip.Ses
 	for _, p := range prefixes {
 		if p.Addr().Is4() {
 			netCfg.IPv4CIDR = p.String()
+			e.assignedV4.Store(p.String())
 			log.Printf("[engine] assigned ipv4: %s", p)
 		} else {
 			netCfg.IPv6CIDR = p.String()
+			e.assignedV6.Store(p.String())
 			log.Printf("[engine] assigned ipv6: %s", p)
 		}
 	}
@@ -484,6 +521,74 @@ func (e *Engine) buildTLSOptions() securitytls.ClientOptions {
 	}
 }
 
+// startAdminServer 启动客户端管理 HTTP 接口，暴露统计信息给 GUI。
+func (e *Engine) startAdminServer(addr string) error {
+	mux := http.NewServeMux()
+
+	// GET /api/v1/stats — 全局统计
+	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		status, _ := e.status.Load().(string)
+		v4, _ := e.assignedV4.Load().(string)
+		v6, _ := e.assignedV6.Load().(string)
+
+		var uptimeSec float64
+		if ct, ok := e.connectedAt.Load().(time.Time); ok && !ct.IsZero() && status == "connected" {
+			uptimeSec = time.Since(ct).Seconds()
+		}
+
+		var txBytes, rxBytes, txPkts, rxPkts, drops uint64
+		if p := e.pump.Load(); p != nil {
+			s := p.Stats()
+			txBytes = s.TxBytes.Load()
+			rxBytes = s.RxBytes.Load()
+			txPkts = s.TxPackets.Load()
+			rxPkts = s.RxPackets.Load()
+			drops = s.Drops.Load()
+		}
+
+		resp := map[string]any{
+			"status":         status,
+			"assigned_ipv4":  v4,
+			"assigned_ipv6":  v6,
+			"uptime_seconds": uptimeSec,
+			"tx_bytes":       txBytes,
+			"rx_bytes":       rxBytes,
+			"tx_packets":     txPkts,
+			"rx_packets":     rxPkts,
+			"drops":          drops,
+			"server":         e.cfg.ConnectIP.Addr,
+			"tun":            e.tunIfName,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	// GET /api/v1/version
+	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"mode": "client"})
+	})
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("admin listen %s: %w", addr, err)
+	}
+
+	e.adminServer = &http.Server{Handler: mux}
+	go func() {
+		log.Printf("[engine] admin server listening on %s", ln.Addr().String())
+		if err := e.adminServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("[engine] admin server error: %v", err)
+		}
+	}()
+	return nil
+}
+
 func (e *Engine) Close() error {
 	var closeErr error
 	e.closeOnce.Do(func() {
@@ -493,6 +598,11 @@ func (e *Engine) Close() error {
 			if e.loopDone != nil {
 				<-e.loopDone
 			}
+		}
+		if e.adminServer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = e.adminServer.Shutdown(ctx)
 		}
 		if e.h3Factory != nil {
 			if err := e.h3Factory.Close(); err != nil {

@@ -1,9 +1,8 @@
 package connectip
 
-import "net/http"
-
+// Options CONNECT-IP 会话选项。
+// 鉴权通过 mTLS 在 TLS 握手阶段完成，此处无需鉴权参数。
 type Options struct {
 	URI       string
 	Authority string
-	AuthFunc  func(*http.Request) error // 可选的鉴权函数，用于修改CONNECT-IP请求
 }

@@ -23,6 +23,10 @@ type ClientConfig struct {
 	TLS       TLSConfig       `json:"tls"`
 	HTTP3     HTTP3Config     `json:"http3"`
 	ConnectIP ConnectIPConfig `json:"connect_ip"`
+
+	// AdminListen 管理/统计 HTTP 接口监听地址（留空则不启动）
+	// 例如 "127.0.0.1:9091" 或 "127.0.0.1:0"（随机端口，从日志读取实际端口）
+	AdminListen string `json:"admin_listen,omitempty"`
 }
 
 // ServerConfig 服务端配置
