@@ -115,13 +115,19 @@ func NewServer(opts ServerOptions) (ServerConfig, error) {
 	}
 
 	// 6. CRL 定时拉取（仅 mTLS 模式下有意义）
+	// 传入 ClientCA PEM，使 CRL fetcher 能验证 certsrv 的自签 TLS 证书
 	var crlFetcher *CRLFetcher
 	if opts.EnableMTLS && opts.CRLUrl != "" {
 		interval := opts.CRLInterval
 		if interval <= 0 {
 			interval = 10 * time.Minute
 		}
-		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, nil)
+		// 读取 CA 证书 PEM（用于验证 certsrv 的 TLS 证书，避免 "unknown authority" 错误）
+		var caCertPEM []byte
+		if opts.ClientCAFile != "" {
+			caCertPEM, _ = os.ReadFile(opts.ClientCAFile)
+		}
+		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, caCertPEM, nil)
 		if err != nil {
 			return nil, fmt.Errorf("init CRL fetcher: %w", err)
 		}

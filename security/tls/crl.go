@@ -15,36 +15,54 @@ import (
 // CRLFetcher 定时从 URL 拉取 CRL 并缓存，
 // 通过 VerifyFunc 提供给 tls.Config.VerifyPeerCertificate 使用。
 type CRLFetcher struct {
-	mu       sync.RWMutex
-	url      string
-	interval time.Duration
-	crl      *x509.RevocationList
-	log      *slog.Logger
-	stopCh   chan struct{}
+	mu         sync.RWMutex
+	url        string
+	interval   time.Duration
+	crl        *x509.RevocationList
+	log        *slog.Logger
+	stopCh     chan struct{}
+	httpClient *http.Client // 携带自定义 CA，用于访问自签证书的 certsrv
 }
 
 // NewCRLFetcher 创建并启动 CRL 定时拉取器。
-// url：CRL PEM 文件的 HTTP(S) 地址（如 http://certsrv:8443/crl.pem）
+// url：CRL PEM 文件的 HTTP(S) 地址（如 https://127.0.0.1:8443/crl.pem）
 // interval：拉取间隔（建议 5~30 分钟）
+// caCertPEM：访问 certsrv 时使用的 CA 证书（PEM 格式），为 nil 时使用系统 CA 池
 //
 // 初始拉取失败不阻塞启动：certsrv 可能比主服务晚启动，
 // 此时 crl 为 nil，VerifyFunc 会放行所有连接（宽松模式），
 // 后台 loop 会持续重试直到拉取成功。
-func NewCRLFetcher(url string, interval time.Duration, log *slog.Logger) (*CRLFetcher, error) {
+func NewCRLFetcher(url string, interval time.Duration, caCertPEM []byte, log *slog.Logger) (*CRLFetcher, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	if interval <= 0 {
 		interval = 10 * time.Minute
 	}
+
+	// 构建 HTTP 客户端：若提供了 CA 证书则用自定义 CA 池，避免自签证书验证失败
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	if len(caCertPEM) > 0 {
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(caCertPEM) {
+			log.Warn("CRLFetcher: failed to parse CA cert PEM, falling back to system CA pool")
+		} else {
+			httpClient.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{
+					RootCAs: certPool,
+				},
+			}
+		}
+	}
+
 	f := &CRLFetcher{
-		url:      url,
-		interval: interval,
-		log:      log,
-		stopCh:   make(chan struct{}),
+		url:        url,
+		interval:   interval,
+		log:        log,
+		stopCh:     make(chan struct{}),
+		httpClient: httpClient,
 	}
 	// 尝试初始拉取，失败时只打警告，不阻塞启动
-	// certsrv 可能与主服务并行启动，稍后会在后台 loop 中重试
 	if err := f.fetch(); err != nil {
 		log.Warn("initial CRL fetch failed, will retry in background (connections allowed until CRL is available)",
 			"url", url, "err", err)
@@ -137,8 +155,7 @@ func (f *CRLFetcher) loop() {
 
 // fetch 从 URL 下载并解析 CRL
 func (f *CRLFetcher) fetch() error {
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(f.url)
+	resp, err := f.httpClient.Get(f.url)
 	if err != nil {
 		return fmt.Errorf("http get: %w", err)
 	}
