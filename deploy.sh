@@ -356,8 +356,7 @@ deploy_docker() {
         --sysctl net.ipv6.conf.all.forwarding=1 \
         -p "${SERVER_PORT}:${SERVER_PORT}/udp" \
         -p "${ADMIN_PORT}:${ADMIN_PORT}/tcp" \
-        -v "$DOCKER_CONFIG_DIR/config.json:/etc/connect-ip-tunnel/config.json:ro" \
-        -v "$CERT_DIR:/etc/connect-ip-tunnel/certs:ro" \
+        -v "$DOCKER_CONFIG_DIR:/etc/connect-ip-tunnel:ro" \
         "$DOCKER_IMAGE" \
         server --config /etc/connect-ip-tunnel/config.json
 
