@@ -21,10 +21,20 @@ import (
 var Version = "dev"
 
 func main() {
-	configPath := flag.String("config", "", "config file path (JSON)")
-	flag.StringVar(configPath, "c", "", "config file path (JSON, shorthand for --config)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	// 支持两种调用方式：
+	//   connect-ip-tunnel --config foo.json        （无子命令）
+	//   connect-ip-tunnel server --config foo.json  （有子命令，兼容 Docker CMD）
+	//   connect-ip-tunnel client --config foo.json
+	args := os.Args[1:]
+	if len(args) > 0 && (args[0] == "server" || args[0] == "client") {
+		args = args[1:] // 跳过子命令，只解析后面的 flags
+	}
+
+	fs := flag.NewFlagSet("connect-ip-tunnel", flag.ExitOnError)
+	configPath := fs.String("config", "", "config file path (JSON)")
+	fs.StringVar(configPath, "c", "", "config file path (JSON, shorthand for --config)")
+	showVersion := fs.Bool("version", false, "print version and exit")
+	_ = fs.Parse(args)
 
 	if *showVersion {
 		log.Printf("connect-ip-tunnel %s", Version)
