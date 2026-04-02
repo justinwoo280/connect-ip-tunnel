@@ -41,6 +41,7 @@ CERTSRV_ENABLED="true"
 
 # Docker 相关
 DOCKER_IMAGE="connect-ip-tunnel:local"
+DOCKER_DATA_DIR="$INSTALL_DIR/data"    # 容器可写数据目录（certsrv DB 等）
 CONTAINER_NAME="connect-ip-server"
 DOCKER_CONFIG_DIR="/opt/connect-ip-tunnel/docker"
 
@@ -191,7 +192,16 @@ gen_server_config() {
     # 构建 certsrv 配置段
     local certsrv_section=""
     if [[ "$CERTSRV_ENABLED" == "true" && -n "$CERTSRV_PORT" ]]; then
-        local db_path="${cert_prefix%/certs}/certsrv.db"
+        # db_path 放在可写目录 /var/lib/connect-ip-tunnel/（Docker 模式）
+        # 或 cert_prefix 同级目录（systemd 模式）
+        local db_path
+        if [[ "$cert_prefix" == "/etc/connect-ip-tunnel/certs" ]]; then
+            # Docker 模式：用独立可写挂载目录
+            db_path="/var/lib/connect-ip-tunnel/certsrv.db"
+        else
+            # systemd 模式：放在安装目录下
+            db_path="${cert_prefix%/certs}/certsrv.db"
+        fi
         certsrv_section=",
     \"certsrv\": {
       \"listen\":       \":${CERTSRV_PORT}\",
@@ -312,7 +322,7 @@ deploy_docker() {
     # 目录结构
     CERT_DIR="$DOCKER_CONFIG_DIR/certs"
     CONFIG_FILE="$DOCKER_CONFIG_DIR/config.json"
-    mkdir -p "$DOCKER_CONFIG_DIR" "$CERT_DIR"
+    mkdir -p "$DOCKER_CONFIG_DIR" "$CERT_DIR" "$DOCKER_DATA_DIR"
 
     # 生成证书
     gen_certs "$CERT_DIR" "$SERVER_CN"
@@ -357,7 +367,9 @@ deploy_docker() {
         --sysctl net.ipv6.conf.all.forwarding=1 \
         -p "${SERVER_PORT}:${SERVER_PORT}/udp" \
         -p "${ADMIN_PORT}:${ADMIN_PORT}/tcp" \
+        -p "${CERTSRV_PORT}:${CERTSRV_PORT}/tcp" \
         -v "$DOCKER_CONFIG_DIR:/etc/connect-ip-tunnel:ro" \
+        -v "$DOCKER_DATA_DIR:/var/lib/connect-ip-tunnel" \
         "$DOCKER_IMAGE" \
         server --config /etc/connect-ip-tunnel/config.json
 

@@ -211,14 +211,32 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, err
 		return nil, nil, fmt.Errorf("cert is not a CA certificate")
 	}
 
-	// 解析私钥
+	// 解析私钥：同时支持 PKCS#8（"PRIVATE KEY"）和 SEC1（"EC PRIVATE KEY"）两种格式
+	// openssl genpkey 生成 PKCS#8，openssl ecparam+eckey 生成 SEC1
 	block, _ = pem.Decode(keyPEM)
 	if block == nil {
 		return nil, nil, fmt.Errorf("invalid CA key PEM")
 	}
-	key, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse CA key: %w", err)
+	var key *ecdsa.PrivateKey
+	switch block.Type {
+	case "PRIVATE KEY": // PKCS#8
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse CA key (PKCS8): %w", err)
+		}
+		var ok bool
+		key, ok = parsed.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, nil, fmt.Errorf("CA key is not an ECDSA key (got %T)", parsed)
+		}
+	case "EC PRIVATE KEY": // SEC1
+		var err error
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse CA key (SEC1): %w", err)
+		}
+	default:
+		return nil, nil, fmt.Errorf("unsupported CA key PEM type: %s", block.Type)
 	}
 
 	return cert, key, nil
