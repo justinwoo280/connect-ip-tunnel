@@ -26,9 +26,16 @@ type CRLFetcher struct {
 // NewCRLFetcher 创建并启动 CRL 定时拉取器。
 // url：CRL PEM 文件的 HTTP(S) 地址（如 http://certsrv:8443/crl.pem）
 // interval：拉取间隔（建议 5~30 分钟）
+//
+// 初始拉取失败不阻塞启动：certsrv 可能比主服务晚启动，
+// 此时 crl 为 nil，VerifyFunc 会放行所有连接（宽松模式），
+// 后台 loop 会持续重试直到拉取成功。
 func NewCRLFetcher(url string, interval time.Duration, log *slog.Logger) (*CRLFetcher, error) {
 	if log == nil {
 		log = slog.Default()
+	}
+	if interval <= 0 {
+		interval = 10 * time.Minute
 	}
 	f := &CRLFetcher{
 		url:      url,
@@ -36,9 +43,11 @@ func NewCRLFetcher(url string, interval time.Duration, log *slog.Logger) (*CRLFe
 		log:      log,
 		stopCh:   make(chan struct{}),
 	}
-	// 启动时立即拉取一次，确保有 CRL 可用
+	// 尝试初始拉取，失败时只打警告，不阻塞启动
+	// certsrv 可能与主服务并行启动，稍后会在后台 loop 中重试
 	if err := f.fetch(); err != nil {
-		return nil, fmt.Errorf("initial CRL fetch from %s: %w", url, err)
+		log.Warn("initial CRL fetch failed, will retry in background (connections allowed until CRL is available)",
+			"url", url, "err", err)
 	}
 	go f.loop()
 	return f, nil
@@ -95,14 +104,30 @@ func (f *CRLFetcher) VerifyFunc() func([][]byte, [][]*x509.Certificate) error {
 }
 
 // loop 后台定时拉取
+// 若 CRL 尚未成功拉取过（crl == nil），使用短间隔（30s）快速重试；
+// 拉取成功后切换为正常间隔。
 func (f *CRLFetcher) loop() {
-	ticker := time.NewTicker(f.interval)
-	defer ticker.Stop()
+	retryInterval := 30 * time.Second
+	timer := time.NewTimer(retryInterval)
+	defer timer.Stop()
+
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			if err := f.fetch(); err != nil {
-				f.log.Warn("CRL refresh failed, using cached CRL", "err", err)
+				f.mu.RLock()
+				hasCRL := f.crl != nil
+				f.mu.RUnlock()
+				if hasCRL {
+					f.log.Warn("CRL refresh failed, using cached CRL", "err", err)
+					timer.Reset(f.interval)
+				} else {
+					// 还没拿到过 CRL，快速重试
+					f.log.Warn("CRL fetch failed, retrying soon", "err", err, "retry_in", retryInterval)
+					timer.Reset(retryInterval)
+				}
+			} else {
+				timer.Reset(f.interval)
 			}
 		case <-f.stopCh:
 			return

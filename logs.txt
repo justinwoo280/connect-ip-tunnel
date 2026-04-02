@@ -1,7 +1,11 @@
-2026/04/02 12:11:37 connect-ip-tunnel dev starting in server mode
-2026/04/02 12:11:37 [server] starting on :26612
-2026/04/02 12:11:37 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
-2026/04/02 12:11:37 [routing] setting up server routing for tun0
-2026/04/02 12:11:37 [routing] tearing down server routing for tun0
-2026/04/02 12:11:37 start server failed: server: setup routing: add client pool route 10.233.0.0/16: ip route add: exit status 2 (output: Error: Device for nexthop is not up.
-)
+2026/04/02 12:14:25 connect-ip-tunnel dev starting in server mode
+2026/04/02 12:14:25 [server] starting on :26612
+2026/04/02 12:14:25 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
+2026/04/02 12:14:25 [routing] setting up server routing for tun0
+2026/04/02 12:14:25 [routing] client pool route: 10.233.0.0/16 -> tun0
+2026/04/02 12:14:25 [routing] client pool route: fd00::/64 -> tun0
+2026/04/02 12:14:25 [routing] ip forwarding enabled
+2026/04/02 12:14:25 [routing] nat enabled: tun0 -> enp0s6
+2026/04/02 12:14:25 [server] tun ready: if=tun0 mtu=1400
+2026/04/02 12:14:25 [routing] tearing down server routing for tun0
+2026/04/02 12:14:25 start server failed: server: init tls server: init CRL fetcher: initial CRL fetch from https://127.0.0.1:8443/crl.pem: http get: Get "https://127.0.0.1:8443/crl.pem": dial tcp 127.0.0.1:8443: connect: connection refused
