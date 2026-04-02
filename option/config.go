@@ -45,6 +45,19 @@ type ServerConfig struct {
 	// 路由配置
 	EnableNAT    bool   `json:"enable_nat"`    // 启用 NAT（MASQUERADE）
 	NATInterface string `json:"nat_interface"` // NAT 出口接口（留空自动检测）
+
+	// CertSrv：CA 证书管理 Web 面板（留空则不启动）
+	CertSrv CertSrvConfig `json:"certsrv,omitempty"`
+}
+
+// CertSrvConfig CA 证书管理面板配置
+type CertSrvConfig struct {
+	Listen     string `json:"listen"`       // 监听地址，如 ":8443"（留空则不启动）
+	DBPath     string `json:"db_path"`      // SQLite 路径，默认 /etc/connect-ip-tunnel/certsrv.db
+	CACertFile string `json:"ca_cert_file"` // CA 证书路径（默认与 tls.client_ca_file 相同）
+	CAKeyFile  string `json:"ca_key_file"`  // CA 私钥路径
+	TLSCert    string `json:"tls_cert"`     // certsrv HTTPS 证书（留空复用 tls.cert_file）
+	TLSKey     string `json:"tls_key"`      // certsrv HTTPS 私钥（留空复用 tls.key_file）
 }
 
 type TUNConfig struct {
@@ -85,6 +98,10 @@ type TLSConfig struct {
 	ClientKeyFile  string `json:"client_key_file,omitempty"`  // 客户端私钥文件路径
 	ClientCAFile   string `json:"client_ca_file,omitempty"`   // 服务端用：验证客户端证书的 CA（PEM 格式）
 	EnableMTLS     bool   `json:"enable_mtls"`                // 服务端用：是否启用 mTLS 验证
+
+	// CRL（证书吊销列表）— 服务端 mTLS 模式下使用
+	CRLUrl      string        `json:"crl_url,omitempty"`      // CRL PEM 的 HTTP(S) URL
+	CRLInterval time.Duration `json:"crl_interval,omitempty"` // 拉取间隔，默认 10m
 
 	EnableSessionCache bool   `json:"enable_session_cache"`
 	SessionCacheSize   int    `json:"session_cache_size"`

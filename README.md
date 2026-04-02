@@ -43,7 +43,24 @@
 
 ## 快速开始
 
-### 使用 Docker（推荐）
+### 一键部署（推荐，VPS 服务端）
+
+```bash
+# 交互式部署（自动生成 mTLS 证书 + 配置 + 启动服务）
+sudo bash deploy.sh
+
+# 或直接指定模式
+sudo bash deploy.sh docker    # Docker 模式
+sudo bash deploy.sh systemd   # systemd 裸机模式
+sudo bash deploy.sh uninstall # 卸载
+```
+
+部署完成后，脚本会输出：
+- 服务端监听地址和端口
+- 生成的客户端证书路径（`client.crt` / `client.key` / `ca.crt`）
+- 完整的客户端配置示例
+
+### 使用 Docker Compose（开发/测试）
 
 ```bash
 # 1. 生成开发用证书
@@ -64,17 +81,17 @@ make logs
 make down
 ```
 
-### 本地运行
+### 手动运行
 
 ```bash
 # 构建
 make build
 
 # 服务端（需要 root 权限创建 TUN）
-sudo ./bin/connect-ip-tunnel server --config deploy/server/config.json
+sudo ./bin/connect-ip-tunnel -c deploy/server/config.json
 
 # 客户端（需要 root 权限创建 TUN）
-sudo ./bin/connect-ip-tunnel client --config deploy/client/config.json
+sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
 ```
 
 ---
@@ -85,64 +102,75 @@ sudo ./bin/connect-ip-tunnel client --config deploy/client/config.json
 
 ```json
 {
-  "listen": "0.0.0.0:443",
-  "uri_template": "/.well-known/masque/ip/{target}/{ip_proto}/",
-  "admin_listen": "127.0.0.1:9090",
-  "tun": {
-    "name": "tun0",
-    "mtu": 1420
-  },
-  "tls": {
-    "cert": "/path/to/server.crt",
-    "key":  "/path/to/server.key",
-    "ca":   "/path/to/ca.crt",
-    "client_auth": true
-  },
-  "http3": {
-    "enable_datagrams": true,
-    "max_idle_timeout": "30s",
-    "keep_alive_period": "10s"
-  },
-  "ipv4_pool": "10.233.0.0/16",
-  "ipv6_pool": "fd00::/64",
-  "enable_nat": true,
-  "nat_interface": ""
+  "mode": "server",
+  "server": {
+    "listen": ":443",
+    "uri_template": "/.well-known/masque/ip",
+    "admin_listen": ":9090",
+    "tun": {
+      "name": "tun0",
+      "mtu": 1420
+    },
+    "tls": {
+      "cert_file":        "/etc/connect-ip-tunnel/certs/server.crt",
+      "key_file":         "/etc/connect-ip-tunnel/certs/server.key",
+      "enable_mtls":      true,
+      "client_ca_file":   "/etc/connect-ip-tunnel/certs/ca.crt",
+      "enable_pqc":       true,
+      "enable_session_cache": true,
+      "session_cache_size":   256
+    },
+    "http3": {
+      "enable_datagrams":  true,
+      "max_idle_timeout":  "60s",
+      "keep_alive_period": "20s"
+    },
+    "ipv4_pool":    "10.233.0.0/16",
+    "ipv6_pool":    "fd00::/64",
+    "enable_nat":   true,
+    "nat_interface": ""
+  }
 }
 ```
+
+完整示例见 [`config.server.example.json`](config.server.example.json)。
 
 ### 客户端配置
 
 ```json
 {
-  "tun": {
-    "name": "tun0",
-    "mtu": 1420
-  },
-  "tls": {
-    "cert":        "/path/to/client.crt",
-    "key":         "/path/to/client.key",
-    "ca":          "/path/to/ca.crt",
-    "server_name": "your-server.example.com"
-  },
-  "http3": {
-    "enable_datagrams": true,
-    "max_idle_timeout": "30s",
-    "keep_alive_period": "10s"
-  },
-  "connect_ip": {
-    "addr":                   "your-server.example.com:443",
-    "uri":                    "/.well-known/masque/ip/{target}/{ip_proto}/",
-    "authority":              "your-server.example.com",
-    "wait_for_address_assign": true,
-    "address_assign_timeout": "30s",
-    "enable_reconnect":       true,
-    "max_reconnect_delay":    "30s",
-    "num_sessions":           1
+  "mode": "client",
+  "client": {
+    "tun": {
+      "name": "tun0",
+      "mtu": 1420
+    },
+    "tls": {
+      "server_name":        "your-server.example.com",
+      "insecure_skip_verify": false,
+      "client_cert_file":   "/etc/connect-ip-tunnel/certs/client.crt",
+      "client_key_file":    "/etc/connect-ip-tunnel/certs/client.key",
+      "enable_pqc":         true,
+      "enable_session_cache": true,
+      "session_cache_size":   128
+    },
+    "http3": {
+      "enable_datagrams":  true,
+      "max_idle_timeout":  "30s",
+      "keep_alive_period": "10s"
+    },
+    "connect_ip": {
+      "addr":              "your-server.example.com:443",
+      "uri":               "/.well-known/masque/ip",
+      "authority":         "your-server.example.com",
+      "enable_reconnect":  true,
+      "max_reconnect_delay": "30s"
+    }
   }
 }
 ```
 
-**`num_sessions`**：多 session 并行数量。设为 CPU 核数可线性提升吞吐量（企业版推荐）。
+完整示例见 [`config.client.example.json`](config.client.example.json)。
 
 ---
 
@@ -179,6 +207,100 @@ curl http://localhost:9090/metrics
 
 ---
 
+## CertSrv — CA 证书管理面板
+
+`certsrv` 是内置的 CA 证书管理 Web 面板，与服务端集成在同一个二进制中，负责：
+
+- **签发** mTLS 客户端证书（`client.crt` + `client.key`）
+- **吊销** 证书并实时更新 CRL
+- **分发** CRL 给服务端定时拉取（服务端在握手时验证）
+
+### 启用方式
+
+在服务端配置中加入 `certsrv` 块：
+
+```json
+{
+  "mode": "server",
+  "server": {
+    "tls": {
+      "crl_url":      "https://127.0.0.1:8443/crl.pem",
+      "crl_interval": "10m"
+    },
+    "certsrv": {
+      "listen":       ":8443",
+      "db_path":      "/etc/connect-ip-tunnel/certsrv.db",
+      "ca_cert_file": "/etc/connect-ip-tunnel/certs/ca.crt",
+      "ca_key_file":  "/etc/connect-ip-tunnel/certs/ca.key"
+    }
+  }
+}
+```
+
+或使用 `deploy.sh` 一键部署时选择启用，脚本会自动填入所有配置。
+
+### 首次登录
+
+1. 浏览器访问 `https://your-server:8443`
+2. 使用默认账号 `admin / admin` 登录
+3. 系统强制引导：**修改密码** → **扫描 QR 码绑定 Google Authenticator**
+4. 后续登录需要：用户名 + 密码 + 6位 TOTP 验证码
+
+### 签发客户端证书
+
+1. 进入面板 → **签发证书**
+2. 填写 CN（设备标识）、备注、有效期
+3. 签发完成后跳转下载页，**私钥仅显示一次**（一次性 Token 机制，刷新即失效）
+4. 下载 `client.crt` + `client.key` + `ca.crt`，安全传输到客户端设备
+
+### 吊销证书
+
+在证书列表页点击**吊销**，填写原因确认后：
+- 证书状态立即更新为"已吊销"
+- CRL 立即重新生成
+- 服务端在下次 CRL 拉取后（最长 `crl_interval`，默认 10 分钟）生效
+
+### CRL 公开端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /crl.pem` | 最新 CRL（PEM 格式），服务端定时拉取 |
+| `GET /ca.crt` | CA 根证书，分发给客户端 |
+
+### certsrv API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/certs` | 列出所有证书（需登录）|
+| `POST` | `/api/v1/certs/issue` | 签发证书（需登录）|
+| `POST` | `/api/v1/certs/revoke` | 吊销证书（需登录）|
+
+```bash
+# 通过 API 签发证书
+curl -b "certsrv_session=<token>" \
+     -H "Content-Type: application/json" \
+     -d '{"cn":"alice-macbook","note":"Alice laptop","days":365}' \
+     https://your-server:8443/api/v1/certs/issue
+
+# 通过 API 吊销证书
+curl -b "certsrv_session=<token>" \
+     -H "Content-Type: application/json" \
+     -d '{"serial":"<hex-serial>","reason":"device lost"}' \
+     https://your-server:8443/api/v1/certs/revoke
+```
+
+### 安全说明
+
+| 特性 | 说明 |
+|------|------|
+| 私钥不入库 | 私钥仅在签发时出现在内存，不持久化存储 |
+| 一次性下载 | 私钥通过内存 Token（10分钟TTL）传递，取出即删除 |
+| 密码保护 | bcrypt（cost=12）哈希存储 |
+| 2FA | TOTP（RFC 6238），兼容 Google Authenticator / Authy |
+| Session | httponly cookie，24小时有效 |
+
+---
+
 ## Prometheus 指标
 
 | 指标 | 类型 | 说明 |
@@ -198,38 +320,37 @@ curl http://localhost:9090/metrics
 
 ## 性能数据
 
-> 测试环境：linux/arm64，2 核
+> 测试环境：linux/arm64，2 核，Go 1.25.6
 
 ### 热路径（核心数据路径）
 
 | 测试项 | 延迟 | 吞吐 | 分配 |
 |---|---|---|---|
-| Flow Hash IPv4 TCP（单核） | 8.4 ns | 2,847 MB/s | 0 |
-| Flow Hash IPv4 TCP（多核并行） | 4.3 ns | 5,641 MB/s | 0 |
-| Flow Distributor Select（N=8） | 10.1 ns | 2,368 MB/s | 0 |
-| Flow Distributor Dispatch（含 channel） | 130 ns | — | 0 |
-| IP 头解析（Dst Addr） | 7.7 ns | 5,169 MB/s | 0 |
-| Flow Hash MTU 包（1400B） | 8.7 ns | 160,100 MB/s | 0 |
+| Flow Hash IPv4 TCP（单核） | 8.5 ns | 2,834 MB/s | 0 |
+| Flow Hash IPv4 TCP（多核并行） | 4.3 ns | 5,540 MB/s | 0 |
+| Flow Distributor Select（N=8） | 10.1 ns | 2,380 MB/s | 0 |
+| Flow Distributor Dispatch（含 channel） | 119 ns | 201 MB/s | 0 |
+| Flow Hash MTU 包（1400B） | 8.7 ns | **160,292 MB/s** | 0 |
 
 ### Dispatcher Session 查找（O(1) 地址索引）
 
 | Session 数 | 延迟 | 随 N 增长 |
 |---|---|---|
-| 1 session | 87.8 ns | — |
-| 10 sessions | **35.2 ns** | 不增长 ✅ |
-| 100 sessions | ~36 ns | 不增长 ✅ |
-| 1000 sessions | ~36 ns | 不增长 ✅ |
-| 100 sessions（/24 前缀回退） | 991 ns | O(N) ⚠️ |
+| 1 session | 88.6 ns | — |
+| 10 sessions | **35.6 ns** | 不增长 ✅ |
+| 100 sessions | 35.0 ns | 不增长 ✅ |
+| 1000 sessions | 36.3 ns | 不增长 ✅ |
+| 100 sessions（/24 前缀回退） | 997 ns | O(N) ⚠️ |
 
 ### IP 池操作（O(1) 反向索引）
 
 | 测试项 | 延迟 | 分配 |
 |---|---|---|
-| AllocateIP + 立即释放（复用路径） | 407 ns | 1 alloc |
-| 会话轮转（64 并发） | 588 ns | 1 alloc |
-| ReleaseIP @ 10 sessions | 372 ns | 1 alloc |
-| ReleaseIP @ 100 sessions | 419 ns | 1 alloc |
-| ReleaseIP @ 1000 sessions | **412 ns** | 1 alloc ✅ |
+| AllocateIP | 409.7 ns | 1 alloc |
+| Allocate + Release 轮转 | 589.9 ns | 1 alloc |
+| ReleaseIP @ 10 sessions | 383.8 ns | 1 alloc |
+| ReleaseIP @ 100 sessions | 419.6 ns | 1 alloc |
+| ReleaseIP @ 1000 sessions | **417.5 ns** | 1 alloc ✅ |
 
 **关键结论**：ReleaseIP 从 10 → 1000 session 延迟几乎不变，O(1) 反向索引有效。
 
@@ -267,15 +388,25 @@ option/                  # 配置结构与校验
 platform/tun/            # TUN 设备抽象（跨平台）
 platform/bypass/         # Bypass 路由（跨平台）
 security/tls/            # TLS 1.3 + ECH + PQC + mTLS
+  crl.go                 # CRL 定时拉取器（mTLS 吊销验证）
 transport/http3/         # HTTP/3 over QUIC 连接工厂
 tunnel/connectip/        # CONNECT-IP 会话适配
 runner/                  # 双向包泵
 common/bufferpool/       # 全局 buffer 池
+certsrv/                 # CA 证书管理面板（内置，与服务端同进程）
+  db.go                  # SQLite 存储（admin + certificates 表）
+  auth.go                # 登录 / bcrypt / TOTP / Session
+  ca.go                  # CA 签发 / 吊销 / CRL 生成
+  keystore.go            # 一次性私钥 Token store
+  server.go              # HTTP 路由 + JSON API
+  static.go              # embed.FS 静态文件挂载
+  static/                # 前端页面（Tailwind CSS，深色主题）
 deploy/                  # 部署配置模板
   server/config.json     # 服务端配置
   client/config.json     # 客户端配置
   prometheus/            # Prometheus 配置
   grafana/               # Grafana 自动 provisioning
+deploy.sh                # 一键部署脚本（Docker / systemd 双模式）
 ```
 
 ---

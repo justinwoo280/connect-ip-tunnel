@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>绑定 2FA — CertSrv</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-950 flex items-center justify-center">
+<div class="w-full max-w-md px-4">
+  <div class="text-center mb-8">
+    <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-green-600 mb-4">
+      <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+      </svg>
+    </div>
+    <h1 class="text-2xl font-bold text-white">绑定 2FA 验证器</h1>
+    <p class="text-gray-400 text-sm mt-1">第二步：扫描二维码</p>
+  </div>
+
+  <div class="bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800">
+    <!-- 步骤指示器 -->
+    <div class="flex items-center mb-8">
+      <div class="flex items-center text-green-400">
+        <div class="w-8 h-8 rounded-full bg-green-700 flex items-center justify-center text-white text-sm">✓</div>
+        <span class="ml-2 text-sm text-gray-400">修改密码</span>
+      </div>
+      <div class="flex-1 h-px bg-indigo-600 mx-3"></div>
+      <div class="flex items-center text-indigo-400">
+        <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white text-sm font-bold">2</div>
+        <span class="ml-2 text-sm font-medium">绑定 2FA</span>
+      </div>
+    </div>
+
+    {{if .}}
+    <div class="mb-4 p-3 bg-red-900/40 border border-red-700 rounded-lg text-red-300 text-sm">
+      验证码错误，请重试。
+    </div>
+    {{end}}
+
+    <div class="text-center mb-6">
+      <p class="text-gray-400 text-sm mb-4">
+        使用 <strong class="text-white">Google Authenticator</strong>、<strong class="text-white">Authy</strong> 或其他 TOTP 应用扫描下方二维码：
+      </p>
+      <!-- QR 码 -->
+      <div class="inline-block p-3 bg-white rounded-xl">
+        <img src="data:image/png;base64,{{.qrBase64}}" alt="TOTP QR Code" class="w-48 h-48">
+      </div>
+      <!-- 手动输入 secret -->
+      <div class="mt-4">
+        <p class="text-xs text-gray-500 mb-1">或手动输入密钥：</p>
+        <code class="text-xs bg-gray-800 px-3 py-1.5 rounded-lg text-indigo-300 tracking-widest select-all">
+          {{.secret}}
+        </code>
+      </div>
+    </div>
+
+    <form method="POST" action="/setup/totp" class="space-y-5">
+      <input type="hidden" name="secret" value="{{.secret}}">
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1.5">输入验证码确认绑定</label>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+          required autofocus
+          class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white
+                 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500
+                 transition tracking-widest text-center text-2xl font-mono"
+          placeholder="000000">
+      </div>
+      <button type="submit"
+        class="w-full py-2.5 bg-green-600 hover:bg-green-500 text-white font-semibold
+               rounded-lg transition focus:outline-none focus:ring-2 focus:ring-green-500
+               focus:ring-offset-2 focus:ring-offset-gray-900">
+        完成绑定，进入面板 →
+      </button>
+    </form>
+  </div>
+</div>
+</body>
+</html>

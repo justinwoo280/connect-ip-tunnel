@@ -16,9 +16,11 @@
     "tls": {
       "server_name": "proxy.example.com",
       "insecure_skip_verify": false,
+      "client_cert_file": "/etc/connect-ip-tunnel/certs/client.crt",
+      "client_key_file":  "/etc/connect-ip-tunnel/certs/client.key",
       "enable_pqc": true,
       "use_system_cas": false,
-      "use_mozilla_ca": true,
+      "use_mozilla_ca": false,
       "enable_ech": true,
       "ech_domain": "proxy.example.com",
       "ech_doh_server": "https://cloudflare-dns.com/dns-query",
@@ -40,10 +42,7 @@
       "addr": "proxy.example.com:443",
       "uri": "/.well-known/masque/ip",
       "authority": "proxy.example.com",
-      "auth": {
-        "method": "bearer",
-        "bearer_token": "your-secret-token-here"
-      }
+      "enable_reconnect": true
     }
   }
 }

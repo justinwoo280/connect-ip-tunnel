@@ -1,6 +1,9 @@
 package tls
 
-import "crypto/x509"
+import (
+	"crypto/x509"
+	"time"
+)
 
 // ClientOptions 描述构建 TLS 客户端配置所需的全部参数。
 type ClientOptions struct {
@@ -50,6 +53,11 @@ type ServerOptions struct {
 	EnableMTLS   bool           // 启用 mTLS 客户端证书验证
 	ClientCAs    *x509.CertPool // 自定义客户端 CA 池（nil 时使用系统 CA）
 	ClientCAFile string         // 客户端 CA 证书文件路径（PEM 格式，可包含多个证书）
+
+	// CRL（证书吊销列表）配置
+	// 设置后服务端会定时从该 URL 拉取 CRL，并在 mTLS 握手时检查客户端证书是否被吊销
+	CRLUrl      string        // CRL PEM 文件的 HTTP(S) URL，例如 http://certsrv:8443/crl.pem
+	CRLInterval time.Duration // CRL 拉取间隔，默认 10 分钟
 
 	EnableSessionCache bool // 启用 TLS session 缓存
 	SessionCacheSize   int  // Session 缓存大小

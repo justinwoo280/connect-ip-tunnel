@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"time"
 )
 
 // ServerConfig TLS 服务端配置接口
@@ -14,8 +15,9 @@ type ServerConfig interface {
 }
 
 type serverConfig struct {
-	tlsConfig *tls.Config
-	keyLog    *os.File
+	tlsConfig  *tls.Config
+	keyLog     *os.File
+	crlFetcher *CRLFetcher
 }
 
 func (s *serverConfig) TLSConfig() *tls.Config {
@@ -23,6 +25,9 @@ func (s *serverConfig) TLSConfig() *tls.Config {
 }
 
 func (s *serverConfig) Close() error {
+	if s.crlFetcher != nil {
+		s.crlFetcher.Stop()
+	}
 	if s.keyLog != nil {
 		return s.keyLog.Close()
 	}
@@ -109,8 +114,23 @@ func NewServer(opts ServerOptions) (ServerConfig, error) {
 		keyLog = f
 	}
 
+	// 6. CRL 定时拉取（仅 mTLS 模式下有意义）
+	var crlFetcher *CRLFetcher
+	if opts.EnableMTLS && opts.CRLUrl != "" {
+		interval := opts.CRLInterval
+		if interval <= 0 {
+			interval = 10 * time.Minute
+		}
+		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, nil)
+		if err != nil {
+			return nil, fmt.Errorf("init CRL fetcher: %w", err)
+		}
+		injectCRLVerifier(tlsCfg, crlFetcher)
+	}
+
 	return &serverConfig{
-		tlsConfig: tlsCfg,
-		keyLog:    keyLog,
+		tlsConfig:  tlsCfg,
+		keyLog:     keyLog,
+		crlFetcher: crlFetcher,
 	}, nil
 }

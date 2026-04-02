@@ -38,9 +38,6 @@
     "addr": "proxy.example.com:443",
     "uri": "/.well-known/masque/ip",
     "authority": "proxy.example.com",
-    "auth": {
-      "method": "bearer",
-      "bearer_token": "your-secret-token-here"
-    }
+    "enable_reconnect": true
   }
 }

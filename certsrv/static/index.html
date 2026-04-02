@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>证书列表 — CertSrv</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-950 text-gray-100">
+
+<!-- 顶栏 -->
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-4">
+  <div class="max-w-6xl mx-auto flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+        </svg>
+      </div>
+      <span class="text-white font-semibold text-lg">CertSrv</span>
+    </div>
+    <div class="flex items-center gap-4">
+      <a href="/certs/issue"
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition">
+        + 签发证书
+      </a>
+      <form method="POST" action="/logout" class="inline">
+        <button type="submit"
+          class="px-3 py-2 text-gray-400 hover:text-white text-sm transition">
+          退出
+        </button>
+      </form>
+    </div>
+  </div>
+</nav>
+
+<!-- 主内容 -->
+<main class="max-w-6xl mx-auto px-6 py-8">
+  <!-- 通知 -->
+  <div id="notice" class="hidden mb-4 p-3 bg-green-900/40 border border-green-700 rounded-lg text-green-300 text-sm"></div>
+
+  <!-- 统计卡片 -->
+  <div class="grid grid-cols-3 gap-4 mb-8" id="stats">
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <p class="text-gray-400 text-sm">总证书数</p>
+      <p class="text-3xl font-bold text-white mt-1" id="stat-total">—</p>
+    </div>
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <p class="text-gray-400 text-sm">有效证书</p>
+      <p class="text-3xl font-bold text-green-400 mt-1" id="stat-valid">—</p>
+    </div>
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <p class="text-gray-400 text-sm">已吊销</p>
+      <p class="text-3xl font-bold text-red-400 mt-1" id="stat-revoked">—</p>
+    </div>
+  </div>
+
+  <!-- 证书表格 -->
+  <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+      <h2 class="text-white font-semibold">客户端证书</h2>
+      <a href="/crl.pem" target="_blank"
+        class="text-xs text-gray-400 hover:text-indigo-400 transition">
+        下载 CRL →
+      </a>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-800 text-gray-400">
+            <th class="text-left px-6 py-3 font-medium">CN / 备注</th>
+            <th class="text-left px-6 py-3 font-medium">序列号</th>
+            <th class="text-left px-6 py-3 font-medium">签发时间</th>
+            <th class="text-left px-6 py-3 font-medium">到期时间</th>
+            <th class="text-left px-6 py-3 font-medium">状态</th>
+            <th class="text-left px-6 py-3 font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody id="cert-table" class="divide-y divide-gray-800">
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-gray-500">加载中...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- 吊销确认弹窗 -->
+<div id="revoke-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+  <div class="bg-gray-900 rounded-2xl border border-gray-700 p-6 w-full max-w-md mx-4 shadow-2xl">
+    <h3 class="text-white font-semibold text-lg mb-2">确认吊销证书</h3>
+    <p class="text-gray-400 text-sm mb-4">吊销后证书将立即加入 CRL，客户端在服务端拉取 CRL 后将无法连接。</p>
+    <div class="mb-4">
+      <label class="block text-sm text-gray-300 mb-1.5">吊销原因</label>
+      <input type="text" id="revoke-reason"
+        class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm
+               focus:outline-none focus:border-red-500 transition"
+        placeholder="如：设备丢失、用户离职...">
+    </div>
+    <div class="flex gap-3">
+      <button onclick="closeRevokeModal()"
+        class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition text-sm">
+        取消
+      </button>
+      <button onclick="confirmRevoke()"
+        class="flex-1 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition text-sm font-medium">
+        确认吊销
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+let revokeSerial = '';
+
+async function loadCerts() {
+  const res = await fetch('/api/v1/certs');
+  const json = await res.json();
+  const certs = json.data || [];
+
+  const total = certs.length;
+  const revoked = certs.filter(c => c.Revoked).length;
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-valid').textContent = total - revoked;
+  document.getElementById('stat-revoked').textContent = revoked;
+
+  const tbody = document.getElementById('cert-table');
+  if (!certs.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-500">暂无证书，<a href="/certs/issue" class="text-indigo-400 hover:underline">立即签发</a></td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = certs.map(c => {
+    const now = new Date();
+    const expires = new Date(c.ExpiresAt);
+    const expiring = !c.Revoked && expires < new Date(now.getTime() + 30*24*60*60*1000);
+    const expired = !c.Revoked && expires < now;
+
+    const statusBadge = c.Revoked
+      ? '<span class="px-2 py-0.5 bg-red-900/60 text-red-300 rounded text-xs">已吊销</span>'
+      : expired
+        ? '<span class="px-2 py-0.5 bg-gray-700 text-gray-400 rounded text-xs">已过期</span>'
+        : expiring
+          ? '<span class="px-2 py-0.5 bg-amber-900/60 text-amber-300 rounded text-xs">即将过期</span>'
+          : '<span class="px-2 py-0.5 bg-green-900/60 text-green-300 rounded text-xs">有效</span>';
+
+    const actions = c.Revoked ? '—' : `
+      <div class="flex items-center gap-2">
+        <a href="/certs/download/${c.Serial}?file=cert"
+           class="text-indigo-400 hover:text-indigo-300 transition text-xs">下载证书</a>
+        <span class="text-gray-700">|</span>
+        <button onclick="openRevokeModal('${c.Serial}')"
+          class="text-red-400 hover:text-red-300 transition text-xs">吊销</button>
+      </div>`;
+
+    return `<tr class="hover:bg-gray-800/50 transition">
+      <td class="px-6 py-4">
+        <div class="font-medium text-white">${escHtml(c.CN)}</div>
+        ${c.Note ? `<div class="text-xs text-gray-500 mt-0.5">${escHtml(c.Note)}</div>` : ''}
+      </td>
+      <td class="px-6 py-4 font-mono text-xs text-gray-400">${c.Serial.slice(0,16)}...</td>
+      <td class="px-6 py-4 text-gray-400 text-xs">${fmtDate(c.IssuedAt)}</td>
+      <td class="px-6 py-4 text-gray-400 text-xs">${fmtDate(c.ExpiresAt)}</td>
+      <td class="px-6 py-4">${statusBadge}</td>
+      <td class="px-6 py-4">${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function openRevokeModal(serial) {
+  revokeSerial = serial;
+  document.getElementById('revoke-reason').value = '';
+  document.getElementById('revoke-modal').classList.remove('hidden');
+}
+function closeRevokeModal() {
+  document.getElementById('revoke-modal').classList.add('hidden');
+}
+async function confirmRevoke() {
+  const reason = document.getElementById('revoke-reason').value || 'unspecified';
+  const res = await fetch('/api/v1/certs/revoke', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({serial: revokeSerial, reason})
+  });
+  closeRevokeModal();
+  if (res.ok) {
+    showNotice('证书已吊销，CRL 已更新');
+    loadCerts();
+  } else {
+    const j = await res.json();
+    showNotice('吊销失败: ' + j.error, true);
+  }
+}
+function showNotice(msg, isError=false) {
+  const el = document.getElementById('notice');
+  el.textContent = msg;
+  el.className = `mb-4 p-3 rounded-lg text-sm border ${isError
+    ? 'bg-red-900/40 border-red-700 text-red-300'
+    : 'bg-green-900/40 border-green-700 text-green-300'}`;
+  setTimeout(() => el.classList.add('hidden'), 4000);
+}
+function fmtDate(s) {
+  return new Date(s).toLocaleDateString('zh-CN', {year:'numeric',month:'2-digit',day:'2-digit'});
+}
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// 检查 URL 参数
+const params = new URLSearchParams(location.search);
+if (params.get('revoked')) showNotice('证书已成功吊销');
+
+loadCerts();
+</script>
+</body>
+</html>

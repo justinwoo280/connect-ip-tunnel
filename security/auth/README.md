@@ -1,141 +1,115 @@
-# CONNECT-IP 鉴权方案
+# CONNECT-IP 认证方案
 
-## 概述
+## 当前方案：mTLS（双向 TLS）
 
-根据 IETF MASQUE 工作组的 CONNECT-IP 草案规范，代理服务器应该限制对已认证用户的访问。本实现支持多种鉴权方式。
+本项目统一使用 **mTLS（Mutual TLS）** 作为唯一认证方式。
 
-## 支持的鉴权方法
+认证在 TLS 握手阶段完成，无需 HTTP 层额外鉴权 Header。
 
-### 1. Bearer Token（推荐）
+### 工作原理
 
-使用 HTTP Authorization header 传递 Bearer Token：
+```
+客户端                          服务端
+  │                               │
+  │── TLS ClientHello ──────────►│
+  │◄─ TLS ServerHello + cert ────│  ← 服务端出示 server.crt
+  │── client cert ───────────────►│  ← 客户端出示 client.crt
+  │   TLS 握手完成                │  ← 服务端用 ca.crt 验证客户端证书
+  │── CONNECT-IP 请求 ───────────►│  ← 无需 Authorization Header
+```
+
+### 证书结构
+
+| 文件 | 用途 | 持有方 |
+|------|------|--------|
+| `ca.crt` | CA 根证书 | **服务端**（验证客户端证书）/ 客户端（可选，验证服务端证书）|
+| `ca.key` | CA 私钥 | 服务端（仅签发证书时使用，签完可离线保存）|
+| `server.crt` / `server.key` | 服务端身份证书（由 CA 签发）| 服务端 |
+| `client.crt` / `client.key` | 客户端身份证书（由 CA 签发，出示给服务端认证）| **客户端** |
+
+**认证流程说明**：
+- 服务端持有 `ca.crt`，用它验证客户端出示的 `client.crt` 是否由本 CA 签发
+- 客户端持有 `client.crt + client.key`，在 TLS 握手时出示给服务端
+- 客户端不需要持有 `ca.crt` 也能完成 mTLS（除非要验证服务端证书合法性）
+- 服务端不需要知道 `client.crt` 本身，只要它是 `ca.crt` 签发的即可
+
+### 服务端配置
 
 ```json
 {
-  "connect_ip": {
-    "addr": "proxy.example.com:443",
-    "uri": "/.well-known/masque/ip",
-    "auth": {
-      "method": "bearer",
-      "bearer_token": "your-secret-token-here"
+  "mode": "server",
+  "server": {
+    "tls": {
+      "cert_file":      "/etc/connect-ip-tunnel/certs/server.crt",
+      "key_file":       "/etc/connect-ip-tunnel/certs/server.key",
+      "enable_mtls":    true,
+      "client_ca_file": "/etc/connect-ip-tunnel/certs/ca.crt"
     }
   }
 }
 ```
 
-HTTP 请求示例：
-```
-CONNECT-IP /.well-known/masque/ip HTTP/3
-Host: proxy.example.com
-Authorization: Bearer your-secret-token-here
-```
-
-### 2. HTTP Basic Auth
-
-使用标准的 HTTP Basic Authentication：
+### 客户端配置
 
 ```json
 {
-  "connect_ip": {
-    "addr": "proxy.example.com:443",
-    "uri": "/.well-known/masque/ip",
-    "auth": {
-      "method": "basic",
-      "username": "user",
-      "password": "pass"
+  "mode": "client",
+  "client": {
+    "tls": {
+      "server_name":      "proxy.example.com",
+      "client_cert_file": "/etc/connect-ip-tunnel/certs/client.crt",
+      "client_key_file":  "/etc/connect-ip-tunnel/certs/client.key"
     }
   }
 }
 ```
 
-HTTP 请求示例：
-```
-CONNECT-IP /.well-known/masque/ip HTTP/3
-Host: proxy.example.com
-Authorization: Basic dXNlcjpwYXNz
-```
+### 证书生成（快速开始）
 
-### 3. Custom Header（兼容 ewp-core）
+使用 `deploy.sh` 一键生成：
 
-使用自定义 header 传递认证信息（例如 UUID）：
-
-```json
-{
-  "connect_ip": {
-    "addr": "proxy.example.com:443",
-    "uri": "/.well-known/masque/ip",
-    "auth": {
-      "method": "custom",
-      "header_name": "X-Auth-Token",
-      "header_value": "550e8400-e29b-41d4-a716-446655440000"
-    }
-  }
-}
+```bash
+sudo bash deploy.sh
 ```
 
-HTTP 请求示例：
+或手动生成：
+
+```bash
+# 1. CA 根证书
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout ca.key -out ca.crt -days 3650 -nodes \
+    -subj "/CN=connect-ip-tunnel-ca"
+
+# 2. 服务端证书
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout server.key -out server.csr -nodes -subj "/CN=your-server-cn"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -out server.crt -days 3650 \
+    -extfile <(printf "subjectAltName=DNS:your-server-cn,IP:127.0.0.1")
+
+# 3. 客户端证书
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout client.key -out client.csr -nodes -subj "/CN=connect-ip-client"
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -out client.crt -days 3650
+
+# 将 client.crt + client.key + ca.crt 分发给客户端
 ```
-CONNECT-IP /.well-known/masque/ip HTTP/3
-Host: proxy.example.com
-X-Auth-Token: 550e8400-e29b-41d4-a716-446655440000
-```
 
-### 4. None（无鉴权）
+---
 
-仅用于测试环境：
+## ⚠️ 已废弃：HTTP 层鉴权（Bearer / Basic / Custom Header）
 
-```json
-{
-  "connect_ip": {
-    "addr": "proxy.example.com:443",
-    "uri": "/.well-known/masque/ip",
-    "auth": {
-      "method": "none"
-    }
-  }
-}
-```
+HTTP 层鉴权方案（Bearer Token、Basic Auth、Custom Header）**已完全废弃**，原因：
 
-## 实现限制
+1. `github.com/quic-go/connect-ip-go` 库的 `Dial` 函数不支持注入自定义 HTTP Header
+2. mTLS 在 TLS 握手阶段完成认证，安全性更高，无需依赖 HTTP 层
+3. mTLS 天然防止中间人攻击，而 Bearer Token 在 HTTP/3 中仍有暴露风险
 
-**重要提示**：由于 `github.com/quic-go/connect-ip-go` 库当前版本不支持在 `Dial` 函数中注入自定义 HTTP header，本实现需要以下两种方案之一：
-
-### 方案 A：Fork connect-ip-go 库（推荐）
-
-1. Fork `github.com/quic-go/connect-ip-go`
-2. 修改 `Dial` 函数签名，添加 `headers map[string]string` 参数
-3. 在构造 CONNECT-IP 请求时注入这些 header
-4. 使用 fork 版本替换依赖
-
-### 方案 B：手动实现 CONNECT-IP 协议
-
-参考 RFC 草案手动实现 CONNECT-IP 握手流程：
-
-1. 创建 HTTP/3 请求：`CONNECT-IP <uri-template>`
-2. 添加必要的 capsule 协议支持
-3. 处理 ADDRESS_ASSIGN 和 ROUTE_ADVERTISEMENT capsules
-4. 实现 IP 包的封装/解封装
-
-## 服务端鉴权验证
-
-服务端应该：
-
-1. 检查 `Authorization` header 或自定义 header
-2. 验证 token/credentials 有效性
-3. 如果鉴权失败，返回 `401 Unauthorized` 或 `403 Forbidden`
-4. 实施速率限制和防暴力破解措施
-5. 记录鉴权失败的审计日志
-
-## 安全建议
-
-1. **始终使用 TLS**：CONNECT-IP 必须运行在 HTTPS/3 上
-2. **启用 ECH**：隐藏 SNI 和鉴权信息
-3. **Token 轮换**：定期更换 Bearer Token
-4. **最小权限**：限制每个 token 的访问范围
-5. **监控异常**：检测异常流量模式
+`security/auth/` 包已移除，请勿在配置中添加 `auth` 字段。
 
 ## 参考资料
 
 - [IETF CONNECT-IP Draft](https://www.ietf.org/archive/id/draft-ietf-masque-connect-ip-04.html)
-- [RFC 9110 - HTTP Semantics (Authorization)](https://www.rfc-editor.org/rfc/rfc9110.html#name-authorization)
-- [RFC 7617 - HTTP Basic Authentication](https://www.rfc-editor.org/rfc/rfc7617.html)
+- [RFC 8446 - TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446)
+- [mTLS 原理](https://www.cloudflare.com/learning/access-management/what-is-mutual-tls/)

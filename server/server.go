@@ -142,7 +142,7 @@ func (s *Server) Start() error {
 			}
 		}()
 
-		// 2. 构建 TLS 配置（含 mTLS）
+		// 2. 构建 TLS 配置（含 mTLS + CRL）
 		tlsServer, err := securitytls.NewServer(securitytls.ServerOptions{
 			CertFile:           s.cfg.TLS.CertFile,
 			KeyFile:            s.cfg.TLS.KeyFile,
@@ -150,6 +150,8 @@ func (s *Server) Start() error {
 			EnablePQC:          s.cfg.TLS.EnablePQC,
 			EnableMTLS:         s.cfg.TLS.EnableMTLS,
 			ClientCAFile:       s.cfg.TLS.ClientCAFile,
+			CRLUrl:             s.cfg.TLS.CRLUrl,
+			CRLInterval:        s.cfg.TLS.CRLInterval,
 			EnableSessionCache: s.cfg.TLS.EnableSessionCache,
 			SessionCacheSize:   s.cfg.TLS.SessionCacheSize,
 		})

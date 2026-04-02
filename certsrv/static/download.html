@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>下载证书 — CertSrv</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-950 text-gray-100">
+
+<!-- 顶栏 -->
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-4">
+  <div class="max-w-2xl mx-auto flex items-center gap-3">
+    <a href="/certs" class="text-gray-400 hover:text-white transition">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+      </svg>
+    </a>
+    <div class="w-8 h-8 rounded-lg bg-green-600 flex items-center justify-center">
+      <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+    </div>
+    <span class="text-white font-semibold">证书签发成功</span>
+  </div>
+</nav>
+
+<main class="max-w-2xl mx-auto px-6 py-8 space-y-6">
+
+  <!-- 成功提示 -->
+  <div class="bg-green-900/20 border border-green-700 rounded-xl p-4 flex items-start gap-3">
+    <svg class="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    </svg>
+    <div>
+      <p class="text-green-300 font-medium text-sm">证书已签发成功</p>
+      <p class="text-green-400/70 text-xs mt-0.5">
+        CN: <span class="font-mono">{{.Cert.CN}}</span>
+        {{if .Cert.Note}} | 备注: {{.Cert.Note}}{{end}}
+        | 到期: {{.Cert.ExpiresAt.Format "2006-01-02"}}
+      </p>
+    </div>
+  </div>
+
+  {{if .HasKey}}
+  <!-- 私钥警告 -->
+  <div class="bg-amber-900/20 border border-amber-700 rounded-xl p-4 flex items-start gap-3">
+    <svg class="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+    </svg>
+    <div>
+      <p class="text-amber-300 font-medium text-sm">私钥仅显示一次，请立即保存！</p>
+      <p class="text-amber-400/70 text-xs mt-0.5">
+        刷新或关闭此页面后将无法再次获取私钥，届时需要重新签发证书。
+      </p>
+    </div>
+  </div>
+
+  <!-- 私钥 -->
+  <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-red-400"></span>
+        <span class="text-sm font-medium text-gray-300">client.key（私钥）</span>
+      </div>
+      <button onclick="copyText('key-pem', this)"
+        class="text-xs text-indigo-400 hover:text-indigo-300 transition px-2 py-1 rounded
+               hover:bg-indigo-900/30">
+        复制
+      </button>
+    </div>
+    <pre id="key-pem"
+      class="p-4 text-xs text-green-300 font-mono overflow-x-auto whitespace-pre-wrap
+             bg-gray-950/50 max-h-48 overflow-y-auto select-all">{{.KeyPEM}}</pre>
+  </div>
+
+  {{else}}
+  <!-- 私钥不可用 -->
+  <div class="bg-red-900/20 border border-red-700 rounded-xl p-4 flex items-start gap-3">
+    <svg class="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+    </svg>
+    <div>
+      <p class="text-red-300 font-medium text-sm">私钥已不可用</p>
+      <p class="text-red-400/70 text-xs mt-0.5">
+        链接已过期或已被使用（私钥仅可取出一次）。
+        如需重新获取，请<a href="/certs/issue" class="underline hover:text-red-300">重新签发证书</a>。
+      </p>
+    </div>
+  </div>
+  {{end}}
+
+  <!-- 证书 -->
+  <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+        <span class="text-sm font-medium text-gray-300">client.crt（证书）</span>
+      </div>
+      <button onclick="copyText('cert-pem', this)"
+        class="text-xs text-indigo-400 hover:text-indigo-300 transition px-2 py-1 rounded
+               hover:bg-indigo-900/30">
+        复制
+      </button>
+    </div>
+    <pre id="cert-pem"
+      class="p-4 text-xs text-blue-300 font-mono overflow-x-auto whitespace-pre-wrap
+             bg-gray-950/50 max-h-48 overflow-y-auto select-all">{{.Cert.CertPEM}}</pre>
+  </div>
+
+  <!-- 下载按钮 -->
+  <div class="grid grid-cols-2 gap-3">
+    {{if .HasKey}}
+    <button onclick="downloadContent('{{.Cert.CN}}', 'key')"
+      class="py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-lg
+             transition flex items-center justify-center gap-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+      下载 client.key
+    </button>
+    {{else}}
+    <div class="py-2.5 bg-gray-800/40 text-gray-600 text-sm font-medium rounded-lg
+                flex items-center justify-center gap-2 cursor-not-allowed">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
+      </svg>
+      私钥不可用
+    </div>
+    {{end}}
+
+    <a href="/certs/download/{{.Cert.Serial}}?file=cert"
+      class="py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-lg
+             transition flex items-center justify-center gap-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+      下载 client.crt
+    </a>
+
+    <a href="/ca.crt" download="ca.crt"
+      class="py-2.5 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-lg
+             transition flex items-center justify-center gap-2">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+      下载 ca.crt
+    </a>
+
+    <a href="/certs"
+      class="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold
+             rounded-lg transition flex items-center justify-center gap-2">
+      返回证书列表 →
+    </a>
+  </div>
+
+  <!-- 客户端配置模板 -->
+  <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+      <span class="text-sm font-medium text-gray-300">客户端配置参考</span>
+      <button onclick="copyText('config-tpl', this)"
+        class="text-xs text-indigo-400 hover:text-indigo-300 transition px-2 py-1 rounded
+               hover:bg-indigo-900/30">
+        复制
+      </button>
+    </div>
+    <pre id="config-tpl"
+      class="p-4 text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre bg-gray-950/50">{
+  "mode": "client",
+  "client": {
+    "tun": { "name": "tun0", "mtu": 1420 },
+    "tls": {
+      "server_name":      "your-server.example.com",
+      "client_cert_file": "/etc/connect-ip-tunnel/certs/client.crt",
+      "client_key_file":  "/etc/connect-ip-tunnel/certs/client.key",
+      "enable_pqc":       true
+    },
+    "connect_ip": {
+      "addr":             "your-server.example.com:443",
+      "uri":              "/.well-known/masque/ip",
+      "authority":        "your-server.example.com",
+      "enable_reconnect": true
+    }
+  }
+}</pre>
+  </div>
+
+</main>
+
+<script>
+// 私钥内容（服务端渲染，仅存在于本次页面加载）
+const keyContent = {{if .HasKey}}document.getElementById('key-pem').textContent{{else}}''{{end}};
+
+function downloadContent(cn, type) {
+  let content, filename;
+  if (type === 'key') {
+    content = keyContent;
+    filename = `client-${cn}.key`;
+  }
+  if (!content) return;
+  const blob = new Blob([content], {type: 'application/x-pem-file'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function copyText(id, btn) {
+  const text = document.getElementById(id).textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '已复制 ✓';
+    btn.classList.add('text-green-400');
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('text-green-400');
+    }, 2000);
+  });
+}
+
+// 防止意外刷新导致私钥丢失
+{{if .HasKey}}
+window.addEventListener('beforeunload', (e) => {
+  e.preventDefault();
+  e.returnValue = '私钥仅显示一次，关闭页面后将无法再次获取，确认已保存？';
+});
+// 点击"返回证书列表"时移除 beforeunload 监听
+document.querySelectorAll('a[href="/certs"]').forEach(a => {
+  a.addEventListener('click', () => {
+    window.removeEventListener('beforeunload', () => {});
+    window.onbeforeunload = null;
+  });
+});
+{{end}}
+</script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>签发证书 — CertSrv</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-950 text-gray-100">
+
+<!-- 顶栏 -->
+<nav class="bg-gray-900 border-b border-gray-800 px-6 py-4">
+  <div class="max-w-2xl mx-auto flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <a href="/certs" class="text-gray-400 hover:text-white transition">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+        </svg>
+      </a>
+      <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+        </svg>
+      </div>
+      <span class="text-white font-semibold">签发新证书</span>
+    </div>
+  </div>
+</nav>
+
+<main class="max-w-2xl mx-auto px-6 py-8">
+  {{if .}}
+  <div class="mb-4 p-3 bg-red-900/40 border border-red-700 rounded-lg text-red-300 text-sm">
+    签发失败：{{.}}
+  </div>
+  {{end}}
+
+  <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
+    <form method="POST" action="/certs/issue" class="space-y-6">
+      <!-- CN -->
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1.5">
+          Common Name (CN) <span class="text-red-400">*</span>
+        </label>
+        <input type="text" name="cn" required
+          class="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white
+                 placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-1
+                 focus:ring-indigo-500 transition"
+          placeholder="如：alice-macbook / server-1 / phone-ios">
+        <p class="mt-1 text-xs text-gray-500">用于标识客户端身份，将嵌入证书 Subject 字段</p>
+      </div>
+
+      <!-- 备注 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1.5">备注</label>
+        <input type="text" name="note"
+          class="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white
+                 placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-1
+                 focus:ring-indigo-500 transition"
+          placeholder="如：Alice 的 MacBook Pro（可选）">
+      </div>
+
+      <!-- 有效期 -->
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-3">有效期</label>
+        <div class="grid grid-cols-4 gap-2" id="days-presets">
+          <button type="button" onclick="setDays(90)"
+            class="days-btn py-2 rounded-lg border border-gray-700 text-sm text-gray-300
+                   hover:border-indigo-500 hover:text-indigo-400 transition">
+            90 天
+          </button>
+          <button type="button" onclick="setDays(365)"
+            class="days-btn py-2 rounded-lg border border-indigo-500 text-sm text-indigo-400
+                   bg-indigo-900/20 transition" data-active="true">
+            1 年
+          </button>
+          <button type="button" onclick="setDays(730)"
+            class="days-btn py-2 rounded-lg border border-gray-700 text-sm text-gray-300
+                   hover:border-indigo-500 hover:text-indigo-400 transition">
+            2 年
+          </button>
+          <button type="button" onclick="setDays(3650)"
+            class="days-btn py-2 rounded-lg border border-gray-700 text-sm text-gray-300
+                   hover:border-indigo-500 hover:text-indigo-400 transition">
+            10 年
+          </button>
+        </div>
+        <div class="mt-3 flex items-center gap-2">
+          <span class="text-xs text-gray-500">或自定义：</span>
+          <input type="number" name="days" id="days-input" value="365"
+            min="1" max="3650"
+            class="w-24 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm
+                   focus:outline-none focus:border-indigo-500 transition">
+          <span class="text-xs text-gray-500">天</span>
+          <span class="text-xs text-gray-600" id="days-expire"></span>
+        </div>
+      </div>
+
+      <!-- 提交 -->
+      <div class="pt-2 flex gap-3">
+        <a href="/certs"
+          class="flex-1 py-2.5 text-center bg-gray-700 hover:bg-gray-600 text-white text-sm
+                 font-medium rounded-lg transition">
+          取消
+        </a>
+        <button type="submit"
+          class="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm
+                 font-semibold rounded-lg transition focus:outline-none focus:ring-2
+                 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-gray-900">
+          签发证书
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- 说明 -->
+  <div class="mt-6 bg-gray-900/50 rounded-xl border border-gray-800 p-4">
+    <h3 class="text-sm font-medium text-gray-300 mb-2">⚠️ 重要提示</h3>
+    <ul class="text-xs text-gray-500 space-y-1">
+      <li>• 私钥（client.key）仅在签发时显示一次，请立即保存</li>
+      <li>• 签发后无法重新下载私钥，如需重新获取请重新签发</li>
+      <li>• 将 client.crt + client.key 安全传输给目标设备</li>
+    </ul>
+  </div>
+</main>
+
+<script>
+function setDays(d) {
+  document.getElementById('days-input').value = d;
+  updateExpiry();
+  document.querySelectorAll('.days-btn').forEach(btn => {
+    const active = parseInt(btn.textContent) === d ||
+      (d === 90 && btn.textContent.includes('90')) ||
+      (d === 365 && btn.textContent.includes('1 年')) ||
+      (d === 730 && btn.textContent.includes('2 年')) ||
+      (d === 3650 && btn.textContent.includes('10 年'));
+    if(active) {
+      btn.className = btn.className.replace('border-gray-700 text-gray-300',
+        'border-indigo-500 text-indigo-400 bg-indigo-900/20');
+    } else {
+      btn.className = btn.className.replace('border-indigo-500 text-indigo-400 bg-indigo-900/20',
+        'border-gray-700 text-gray-300');
+    }
+  });
+}
+function updateExpiry() {
+  const d = parseInt(document.getElementById('days-input').value) || 365;
+  const exp = new Date(Date.now() + d * 86400000);
+  document.getElementById('days-expire').textContent =
+    '到期：' + exp.toLocaleDateString('zh-CN');
+}
+document.getElementById('days-input').addEventListener('input', updateExpiry);
+updateExpiry();
+</script>
+</body>
+</html>
