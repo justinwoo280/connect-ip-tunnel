@@ -130,6 +130,8 @@ gen_certs() {
         -out "$cert_dir/ca.crt" \
         -days 3650 -nodes \
         -subj "/CN=connect-ip-tunnel-ca" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign" \
         2>/dev/null
 
     info "生成服务端证书..."

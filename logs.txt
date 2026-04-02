@@ -1,14 +1,14 @@
-2026/04/02 12:22:17 connect-ip-tunnel dev starting in server mode
-2026/04/02 12:22:17 [server] starting on :26612
-2026/04/02 12:22:17 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
-2026/04/02 12:22:17 [routing] setting up server routing for tun0
-2026/04/02 12:22:17 [routing] client pool route: 10.233.0.0/16 -> tun0
-2026/04/02 12:22:17 [routing] client pool route: fd00::/64 -> tun0
-2026/04/02 12:22:17 [routing] ip forwarding enabled
-2026/04/02 12:22:17 [routing] nat enabled: tun0 -> enp0s6
-2026/04/02 12:22:17 [server] tun ready: if=tun0 mtu=1400
-2026/04/02 12:22:17 WARN initial CRL fetch failed, will retry in background (connections allowed until CRL is available) url=https://127.0.0.1:8443/crl.pem err="http get: Get \"https://127.0.0.1:8443/crl.pem\": dial tcp 127.0.0.1:8443: connect: connection refused"
-2026/04/02 12:22:17 [server] mTLS enabled, client certificates required
-2026/04/02 12:22:17 [server] started: listen=:26612 tun=tun0
-2026/04/02 12:22:17 [server] admin/metrics listening on :9090
-2026/04/02 12:22:17 start certsrv failed: certsrv: init CA: load CA: parse CA key: x509: failed to parse private key (use ParsePKCS8PrivateKey instead for this key format)
+2026/04/02 12:27:35 connect-ip-tunnel dev starting in server mode
+2026/04/02 12:27:35 [server] starting on :26612
+2026/04/02 12:27:35 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
+2026/04/02 12:27:35 [routing] setting up server routing for tun0
+2026/04/02 12:27:35 [routing] client pool route: 10.233.0.0/16 -> tun0
+2026/04/02 12:27:35 [routing] client pool route: fd00::/64 -> tun0
+2026/04/02 12:27:35 [routing] ip forwarding enabled
+2026/04/02 12:27:35 [routing] nat enabled: tun0 -> enp0s6
+2026/04/02 12:27:35 [server] tun ready: if=tun0 mtu=1400
+2026/04/02 12:27:35 WARN initial CRL fetch failed, will retry in background (connections allowed until CRL is available) url=https://127.0.0.1:8443/crl.pem err="http get: Get \"https://127.0.0.1:8443/crl.pem\": dial tcp 127.0.0.1:8443: connect: connection refused"
+2026/04/02 12:27:35 [server] mTLS enabled, client certificates required
+2026/04/02 12:27:35 [server] started: listen=:26612 tun=tun0
+2026/04/02 12:27:35 [server] admin/metrics listening on :9090
+2026/04/02 12:27:35 start certsrv failed: certsrv: init CA: initial CRL: create CRL: x509: template contains nil Number field

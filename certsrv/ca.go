@@ -161,6 +161,7 @@ func (ca *CAService) refreshCRL() error {
 		ThisUpdate:                now,
 		NextUpdate:                nextUpdate,
 		SignatureAlgorithm:        x509.ECDSAWithSHA256,
+		Number:                    big.NewInt(time.Now().Unix()), // Go 1.21+ 要求非 nil
 	}
 
 	crlDER, err := x509.CreateRevocationList(rand.Reader, tmpl, ca.caCert, ca.caKey)
