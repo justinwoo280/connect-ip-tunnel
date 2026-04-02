@@ -81,13 +81,14 @@ command_exists() {
 
 prompt() {
     # prompt "提示" "默认值" -> 返回用户输入或默认值
+    # 注意：提示符输出到 stderr，避免被 $() 捕获时混入返回值
     local msg="$1"
     local default="${2:-}"
     local input
     if [[ -n "$default" ]]; then
-        echo -en "${CYAN}  → ${msg} [${default}]: ${NC}"
+        echo -en "${CYAN}  → ${msg} [${default}]: ${NC}" >&2
     else
-        echo -en "${CYAN}  → ${msg}: ${NC}"
+        echo -en "${CYAN}  → ${msg}: ${NC}" >&2
     fi
     read -r input
     echo "${input:-$default}"
@@ -97,7 +98,7 @@ prompt_yn() {
     local msg="$1"
     local default="${2:-y}"
     local input
-    echo -en "${CYAN}  → ${msg} [${default}]: ${NC}"
+    echo -en "${CYAN}  → ${msg} [${default}]: ${NC}" >&2
     read -r input
     input="${input:-$default}"
     [[ "$input" =~ ^[Yy] ]]
@@ -229,9 +230,14 @@ gen_server_config() {
       "session_cache_size":  256${crl_config}
     },
     "http3": {
-      "enable_datagrams":  true,
-      "max_idle_timeout":  "60s",
-      "keep_alive_period": "20s"
+      "enable_datagrams":        true,
+      "max_idle_timeout":        "60s",
+      "keep_alive_period":       "20s",
+      "disable_path_mtu_probe":  false,
+      "initial_stream_window":   16777216,
+      "max_stream_window":       67108864,
+      "initial_conn_window":     33554432,
+      "max_conn_window":         134217728
     },
     "ipv4_pool":    "${IPV4_POOL}",
     "ipv6_pool":    "${IPV6_POOL}",
