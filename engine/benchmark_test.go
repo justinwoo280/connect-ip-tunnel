@@ -123,6 +123,98 @@ func BenchmarkParseDstAddr(b *testing.B) {
 	}
 }
 
+// ── Dispatch Path Micro Benchmarks ───────────────────────────────────────────
+
+// BenchmarkSelectN8 精准测量 n=8（2的幂，走位掩码路径）的 Select 开销。
+func BenchmarkSelectN8(b *testing.B) {
+	dist := newFlowDistributor(8)
+	pkts := make([][]byte, 256)
+	for i := range pkts {
+		pkts[i] = buildIPv4TCPPacket(
+			net.ParseIP("10.0.0.1"), net.ParseIP("8.8.8.8"),
+			uint16(10000+i), 443,
+		)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = dist.Select(pkts[i%256])
+	}
+}
+
+// BenchmarkSelectN6 精准测量 n=6（非2的幂，走取模路径）的 Select 开销。
+func BenchmarkSelectN6(b *testing.B) {
+	dist := newFlowDistributor(6)
+	pkts := make([][]byte, 256)
+	for i := range pkts {
+		pkts[i] = buildIPv4TCPPacket(
+			net.ParseIP("10.0.0.1"), net.ParseIP("8.8.8.8"),
+			uint16(10000+i), 443,
+		)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = dist.Select(pkts[i%256])
+	}
+}
+
+// BenchmarkSelectParallel 多核并发 Select（模拟多 goroutine 同时分发）。
+func BenchmarkSelectParallel(b *testing.B) {
+	dist := newFlowDistributor(8)
+	pkts := make([][]byte, 256)
+	for i := range pkts {
+		pkts[i] = buildIPv4TCPPacket(
+			net.ParseIP("10.0.0.1"), net.ParseIP("8.8.8.8"),
+			uint16(10000+i), 443,
+		)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		idx := 0
+		for pb.Next() {
+			_ = dist.Select(pkts[idx%256])
+			idx++
+		}
+	})
+}
+
+// BenchmarkHash4 单独测量 hash4（murmur）的开销（dispatch 里的核心计算）。
+func BenchmarkHash4(b *testing.B) {
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = hash4(0x0a000001, 0x08080808, 6, 0xd4310000|443)
+	}
+}
+
+// BenchmarkIPv4FlowHash 单独测量 ipv4FlowHash（解析+hash）开销。
+func BenchmarkIPv4FlowHash(b *testing.B) {
+	pkt := buildIPv4TCPPacket(
+		net.ParseIP("10.0.0.1"), net.ParseIP("8.8.8.8"), 54321, 443,
+	)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ipv4FlowHash(pkt)
+	}
+}
+
+// BenchmarkIPv6FlowHash 单独测量 ipv6FlowHash（含扩展头遍历）开销。
+func BenchmarkIPv6FlowHash(b *testing.B) {
+	// 最小 IPv6 + TCP 包（40B header + 4B TCP ports）
+	pkt := make([]byte, 44)
+	pkt[0] = 0x60 // IPv6
+	pkt[6] = 6    // Next Header = TCP
+	// src [8:24], dst [24:40] 全零即可
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ipv6FlowHash(pkt)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func buildIPv4UDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payloadSize int) []byte {

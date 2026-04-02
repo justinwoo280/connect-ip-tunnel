@@ -18,9 +18,14 @@
       "session_cache_size":   256
     },
     "http3": {
-      "enable_datagrams":  true,
-      "max_idle_timeout":  "60s",
-      "keep_alive_period": "20s"
+      "enable_datagrams":        true,
+      "max_idle_timeout":        "60s",
+      "keep_alive_period":       "20s",
+      "disable_path_mtu_probe":  false,
+      "initial_stream_window":   16777216,
+      "max_stream_window":       67108864,
+      "initial_conn_window":     33554432,
+      "max_conn_window":         134217728
     },
     "ipv4_pool":    "10.233.0.0/16",
     "ipv6_pool":    "fd00::/64",

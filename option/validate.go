@@ -30,6 +30,21 @@ func (c *Config) Validate() error {
 	return c.Server.Validate()
 }
 
+// QUIC 窗口参数默认值（面向 10 Gbps 场景设计）
+//
+// BDP（带宽时延积）= bandwidth × RTT，窗口必须 >= BDP 才能跑满链路：
+//   10 Gbps × 10ms RTT → BDP = 12.5 MB → 初始窗口 16 MB，最大 128 MB
+//   1  Gbps × 50ms RTT → BDP = 6.25 MB → 初始窗口 16 MB 同样足够
+//
+// Stream 窗口：CONNECT-IP 用单条 stream 传 capsule，窗口同样需要足够大。
+// Connection 窗口 >= Stream 窗口，通常设为 Stream 的 4-8 倍。
+const (
+	defaultInitialStreamWindow = 16 * 1024 * 1024  // 16 MB
+	defaultMaxStreamWindow     = 64 * 1024 * 1024  // 64 MB
+	defaultInitialConnWindow   = 32 * 1024 * 1024  // 32 MB
+	defaultMaxConnWindow       = 128 * 1024 * 1024 // 128 MB
+)
+
 // ClientConfig 方法
 func (c *ClientConfig) ApplyDefaults() {
 	if c.TUN.MTU <= 0 {
@@ -51,6 +66,19 @@ func (c *ClientConfig) ApplyDefaults() {
 	// 重连默认启用
 	if c.ConnectIP.MaxReconnectDelay == 0 {
 		c.ConnectIP.MaxReconnectDelay = 30 * time.Second
+	}
+	// QUIC 流控窗口：未配置时使用面向高带宽的默认值
+	if c.HTTP3.InitialStreamWindow <= 0 {
+		c.HTTP3.InitialStreamWindow = defaultInitialStreamWindow
+	}
+	if c.HTTP3.MaxStreamWindow <= 0 {
+		c.HTTP3.MaxStreamWindow = defaultMaxStreamWindow
+	}
+	if c.HTTP3.InitialConnWindow <= 0 {
+		c.HTTP3.InitialConnWindow = defaultInitialConnWindow
+	}
+	if c.HTTP3.MaxConnWindow <= 0 {
+		c.HTTP3.MaxConnWindow = defaultMaxConnWindow
 	}
 }
 
@@ -79,19 +107,32 @@ func (s *ServerConfig) ApplyDefaults() {
 		s.TUN.MTU = 1400
 	}
 	if s.HTTP3.MaxIdleTimeout == 0 {
-		s.HTTP3.MaxIdleTimeout = 30 * time.Second
+		s.HTTP3.MaxIdleTimeout = 60 * time.Second
 	}
 	if s.HTTP3.KeepAlivePeriod == 0 {
-		s.HTTP3.KeepAlivePeriod = 10 * time.Second
+		s.HTTP3.KeepAlivePeriod = 20 * time.Second
 	}
 	if s.TLS.SessionCacheSize <= 0 {
-		s.TLS.SessionCacheSize = 128
+		s.TLS.SessionCacheSize = 256
 	}
 	if s.IPv4Pool == "" {
 		s.IPv4Pool = "10.0.0.0/24"
 	}
 	if s.IPv6Pool == "" {
 		s.IPv6Pool = "fd00::/64"
+	}
+	// QUIC 流控窗口：服务端面向多客户端并发，单连接窗口与客户端一致
+	if s.HTTP3.InitialStreamWindow <= 0 {
+		s.HTTP3.InitialStreamWindow = defaultInitialStreamWindow
+	}
+	if s.HTTP3.MaxStreamWindow <= 0 {
+		s.HTTP3.MaxStreamWindow = defaultMaxStreamWindow
+	}
+	if s.HTTP3.InitialConnWindow <= 0 {
+		s.HTTP3.InitialConnWindow = defaultInitialConnWindow
+	}
+	if s.HTTP3.MaxConnWindow <= 0 {
+		s.HTTP3.MaxConnWindow = defaultMaxConnWindow
 	}
 }
 

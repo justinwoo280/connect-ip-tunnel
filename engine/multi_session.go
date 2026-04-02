@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connect-ip-tunnel/tunnel/connectip"
@@ -13,14 +14,20 @@ import (
 // MultiSessionPool 维护 N 个并行 CONNECT-IP session，
 // 通过 FlowDistributor 将上行包按五元组哈希分发到各 session，
 // 充分利用多核、多 QUIC 连接的并行能力。
+//
+// 热路径优化：
+//   - sessions/distributor/n 在构建后不再修改，直接无锁读取
+//   - closed 用 atomic.Bool 保护，WritePacket/ReadFrom 无需持锁
+//   - Close() 仍用 sync.Mutex 保证幂等性
 type MultiSessionPool struct {
+	// 只读字段：构建后不变，无需锁保护
 	sessions    []*connectip.Session
 	distributor *FlowDistributor
 	n           int
 
-	mu      sync.RWMutex
-	closed  bool
+	closed  atomic.Bool
 	closeCh chan struct{}
+	closeMu sync.Mutex // 仅用于 Close() 幂等保护
 }
 
 // newMultiSessionPool 创建并返回一个 N 个 session 的并行池。
@@ -39,39 +46,32 @@ func newMultiSessionPool(sessions []*connectip.Session) *MultiSessionPool {
 }
 
 // WritePacket 将 IP 包按 flow hash 写入对应 session（上行，client→server）。
+// 热路径：无锁，仅做 atomic load。
 func (p *MultiSessionPool) WritePacket(pkt []byte) error {
-	p.mu.RLock()
-	if p.closed {
-		p.mu.RUnlock()
+	if p.closed.Load() {
 		return fmt.Errorf("multi session pool closed")
 	}
 	idx := p.distributor.Select(pkt)
-	sess := p.sessions[idx]
-	p.mu.RUnlock()
-	return sess.WritePacket(pkt)
+	return p.sessions[idx].WritePacket(pkt)
 }
 
 // ReadFrom 从指定 session 读取下行包（server→client）。
 // 由 aggregator goroutine 调用，每个 session 一个独立 goroutine。
 func (p *MultiSessionPool) ReadFrom(idx int, buf []byte) (int, error) {
-	p.mu.RLock()
-	if p.closed || idx >= p.n {
-		p.mu.RUnlock()
-		return 0, fmt.Errorf("multi session pool closed or invalid index")
+	if p.closed.Load() {
+		return 0, fmt.Errorf("multi session pool closed")
 	}
-	sess := p.sessions[idx]
-	p.mu.RUnlock()
-	return sess.ReadPacket(buf)
+	return p.sessions[idx].ReadPacket(buf)
 }
 
-// Close 关闭所有 session。
+// Close 关闭所有 session。幂等，线程安全。
 func (p *MultiSessionPool) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	if p.closed.Load() {
 		return nil
 	}
-	p.closed = true
+	p.closed.Store(true)
 	close(p.closeCh)
 	var lastErr error
 	for _, sess := range p.sessions {

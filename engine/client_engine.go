@@ -344,16 +344,13 @@ func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool
 	}
 
 	// 上行：TUN → flow hash → 对应 session
+	// 热路径优化：去掉每次迭代的 select/ctx 检查，仅在 err 时检查 ctx。
+	// ReadPacket 在 ctx 取消（TUN 关闭）时会立即返回错误，无需轮询 ctx.Done()。
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, bufSize)
 		for {
-			select {
-			case <-pumpCtx.Done():
-				return
-			default:
-			}
 			n, err := e.tunDevice.ReadPacket(buf)
 			if err != nil {
 				if pumpCtx.Err() != nil {
@@ -384,6 +381,7 @@ func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool
 	}()
 
 	// 下行：各 session → TUN，每个 session 独立 goroutine
+	// 热路径优化：同上行，去掉每次迭代的 select/ctx 轮询。
 	for i := 0; i < pool.SessionCount(); i++ {
 		idx := i
 		wg.Add(1)
@@ -391,11 +389,6 @@ func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool
 			defer wg.Done()
 			buf := make([]byte, bufSize)
 			for {
-				select {
-				case <-pumpCtx.Done():
-					return
-				default:
-				}
 				n, err := pool.ReadFrom(idx, buf)
 				if err != nil {
 					if pumpCtx.Err() != nil {
