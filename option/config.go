@@ -1,6 +1,42 @@
 package option
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+// Duration 是一个支持 JSON 字符串（如 "10m"、"30s"）和纳秒数字两种格式的时间类型。
+// 标准 time.Duration 的 JSON 解析只支持数字（纳秒），不支持人类可读字符串。
+type Duration struct {
+	time.Duration
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + d.Duration.String() + `"`), nil
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	s := string(b)
+	// 数字格式（纳秒）：兼容旧配置
+	if len(s) > 0 && s[0] != '"' {
+		var ns int64
+		if _, err := fmt.Sscanf(s, "%d", &ns); err != nil {
+			return fmt.Errorf("invalid duration %s: %w", s, err)
+		}
+		d.Duration = time.Duration(ns)
+		return nil
+	}
+	// 字符串格式："10m"、"30s"、"1h30m" 等
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return fmt.Errorf("invalid duration format: %s", s)
+	}
+	dur, err := time.ParseDuration(s[1 : len(s)-1])
+	if err != nil {
+		return fmt.Errorf("invalid duration %s: %w", s, err)
+	}
+	d.Duration = dur
+	return nil
+}
 
 // Mode 运行模式
 type Mode string
@@ -100,8 +136,8 @@ type TLSConfig struct {
 	EnableMTLS     bool   `json:"enable_mtls"`                // 服务端用：是否启用 mTLS 验证
 
 	// CRL（证书吊销列表）— 服务端 mTLS 模式下使用
-	CRLUrl      string        `json:"crl_url,omitempty"`      // CRL PEM 的 HTTP(S) URL
-	CRLInterval time.Duration `json:"crl_interval,omitempty"` // 拉取间隔，默认 10m
+	CRLUrl      string   `json:"crl_url,omitempty"`      // CRL PEM 的 HTTP(S) URL
+	CRLInterval Duration `json:"crl_interval,omitempty"` // 拉取间隔，默认 10m，支持 "10m"/"1h" 字符串
 
 	EnableSessionCache bool   `json:"enable_session_cache"`
 	SessionCacheSize   int    `json:"session_cache_size"`
@@ -109,18 +145,18 @@ type TLSConfig struct {
 }
 
 type HTTP3Config struct {
-	EnableDatagrams      bool          `json:"enable_datagrams"`
-	MaxIdleTimeout       time.Duration `json:"max_idle_timeout"`
-	KeepAlivePeriod      time.Duration `json:"keep_alive_period"`
-	Allow0RTT            bool          `json:"allow_0rtt"`
-	DisablePathMTUProbe  bool          `json:"disable_path_mtu_probe"`
-	InitialStreamWindow  int64         `json:"initial_stream_window"`
-	MaxStreamWindow      int64         `json:"max_stream_window"`
-	InitialConnWindow    int64         `json:"initial_conn_window"`
-	MaxConnWindow        int64         `json:"max_conn_window"`
-	DisableCompression   bool          `json:"disable_compression"`
-	TLSHandshakeTimeout  time.Duration `json:"tls_handshake_timeout"`
-	MaxResponseHeaderSec int           `json:"max_response_header_sec"`
+	EnableDatagrams      bool     `json:"enable_datagrams"`
+	MaxIdleTimeout       Duration `json:"max_idle_timeout"`
+	KeepAlivePeriod      Duration `json:"keep_alive_period"`
+	Allow0RTT            bool     `json:"allow_0rtt"`
+	DisablePathMTUProbe  bool     `json:"disable_path_mtu_probe"`
+	InitialStreamWindow  int64    `json:"initial_stream_window"`
+	MaxStreamWindow      int64    `json:"max_stream_window"`
+	InitialConnWindow    int64    `json:"initial_conn_window"`
+	MaxConnWindow        int64    `json:"max_conn_window"`
+	DisableCompression   bool     `json:"disable_compression"`
+	TLSHandshakeTimeout  Duration `json:"tls_handshake_timeout"`
+	MaxResponseHeaderSec int      `json:"max_response_header_sec"`
 }
 
 type ConnectIPConfig struct {
@@ -129,12 +165,12 @@ type ConnectIPConfig struct {
 	Authority string `json:"authority"`
 
 	// ADDRESS_ASSIGN: 等待服务端分配 IP 后再配置 TUN
-	WaitForAddressAssign bool          `json:"wait_for_address_assign"` // 默认 true
-	AddressAssignTimeout time.Duration `json:"address_assign_timeout"`  // 默认 30s
+	WaitForAddressAssign bool     `json:"wait_for_address_assign"` // 默认 true
+	AddressAssignTimeout Duration `json:"address_assign_timeout"`  // 默认 30s
 
 	// 重连配置
-	EnableReconnect   bool          `json:"enable_reconnect"`    // 默认 true
-	MaxReconnectDelay time.Duration `json:"max_reconnect_delay"` // 默认 30s
+	EnableReconnect   bool     `json:"enable_reconnect"`    // 默认 true
+	MaxReconnectDelay Duration `json:"max_reconnect_delay"` // 默认 30s
 
 	// 多 session 并行（企业版特性，开源版固定为 1）
 	// 启用后客户端会并行建立 N 条 CONNECT-IP session，

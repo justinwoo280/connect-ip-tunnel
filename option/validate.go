@@ -50,22 +50,22 @@ func (c *ClientConfig) ApplyDefaults() {
 	if c.TUN.MTU <= 0 {
 		c.TUN.MTU = 1400
 	}
-	if c.HTTP3.MaxIdleTimeout == 0 {
-		c.HTTP3.MaxIdleTimeout = 30 * time.Second
+	if c.HTTP3.MaxIdleTimeout.Duration == 0 {
+		c.HTTP3.MaxIdleTimeout = Duration{30 * time.Second}
 	}
-	if c.HTTP3.KeepAlivePeriod == 0 {
-		c.HTTP3.KeepAlivePeriod = 10 * time.Second
+	if c.HTTP3.KeepAlivePeriod.Duration == 0 {
+		c.HTTP3.KeepAlivePeriod = Duration{10 * time.Second}
 	}
 	if c.TLS.SessionCacheSize <= 0 {
 		c.TLS.SessionCacheSize = 128
 	}
 	// ADDRESS_ASSIGN 默认启用
-	if c.ConnectIP.AddressAssignTimeout == 0 {
-		c.ConnectIP.AddressAssignTimeout = 30 * time.Second
+	if c.ConnectIP.AddressAssignTimeout.Duration == 0 {
+		c.ConnectIP.AddressAssignTimeout = Duration{30 * time.Second}
 	}
 	// 重连默认启用
-	if c.ConnectIP.MaxReconnectDelay == 0 {
-		c.ConnectIP.MaxReconnectDelay = 30 * time.Second
+	if c.ConnectIP.MaxReconnectDelay.Duration == 0 {
+		c.ConnectIP.MaxReconnectDelay = Duration{30 * time.Second}
 	}
 	// QUIC 流控窗口：未配置时使用面向高带宽的默认值
 	if c.HTTP3.InitialStreamWindow <= 0 {
@@ -106,11 +106,11 @@ func (s *ServerConfig) ApplyDefaults() {
 	if s.TUN.MTU <= 0 {
 		s.TUN.MTU = 1400
 	}
-	if s.HTTP3.MaxIdleTimeout == 0 {
-		s.HTTP3.MaxIdleTimeout = 60 * time.Second
+	if s.HTTP3.MaxIdleTimeout.Duration == 0 {
+		s.HTTP3.MaxIdleTimeout = Duration{60 * time.Second}
 	}
-	if s.HTTP3.KeepAlivePeriod == 0 {
-		s.HTTP3.KeepAlivePeriod = 20 * time.Second
+	if s.HTTP3.KeepAlivePeriod.Duration == 0 {
+		s.HTTP3.KeepAlivePeriod = Duration{20 * time.Second}
 	}
 	if s.TLS.SessionCacheSize <= 0 {
 		s.TLS.SessionCacheSize = 256

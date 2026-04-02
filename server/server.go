@@ -151,7 +151,7 @@ func (s *Server) Start() error {
 			EnableMTLS:         s.cfg.TLS.EnableMTLS,
 			ClientCAFile:       s.cfg.TLS.ClientCAFile,
 			CRLUrl:             s.cfg.TLS.CRLUrl,
-			CRLInterval:        s.cfg.TLS.CRLInterval,
+			CRLInterval:        s.cfg.TLS.CRLInterval.Duration,
 			EnableSessionCache: s.cfg.TLS.EnableSessionCache,
 			SessionCacheSize:   s.cfg.TLS.SessionCacheSize,
 		})
@@ -179,8 +179,8 @@ func (s *Server) Start() error {
 
 		quicCfg := &quic.Config{
 			EnableDatagrams: true,
-			MaxIdleTimeout:  s.cfg.HTTP3.MaxIdleTimeout,
-			KeepAlivePeriod: s.cfg.HTTP3.KeepAlivePeriod,
+			MaxIdleTimeout:  s.cfg.HTTP3.MaxIdleTimeout.Duration,
+			KeepAlivePeriod: s.cfg.HTTP3.KeepAlivePeriod.Duration,
 		}
 
 		listener, err := quic.Listen(udpConn, tlsServer.TLSConfig(), quicCfg)

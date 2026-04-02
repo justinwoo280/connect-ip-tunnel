@@ -128,8 +128,8 @@ func (e *Engine) Start() error {
 		// 5. 构建 HTTP/3 工厂（复用已构建的 tlsClient，避免重复加载证书）
 		h3Opts := h3transport.Options{
 			EnableDatagrams:                e.cfg.HTTP3.EnableDatagrams,
-			MaxIdleTimeout:                 e.cfg.HTTP3.MaxIdleTimeout,
-			KeepAlivePeriod:                e.cfg.HTTP3.KeepAlivePeriod,
+			MaxIdleTimeout:                 e.cfg.HTTP3.MaxIdleTimeout.Duration,
+			KeepAlivePeriod:                e.cfg.HTTP3.KeepAlivePeriod.Duration,
 			Allow0RTT:                      e.cfg.HTTP3.Allow0RTT,
 			DisablePathMTUDiscovery:        e.cfg.HTTP3.DisablePathMTUProbe,
 			InitialStreamReceiveWindow:     uint64(e.cfg.HTTP3.InitialStreamWindow),
@@ -204,8 +204,8 @@ func (e *Engine) runLoop(ctx context.Context) {
 		// 指数退避 + jitter
 		jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
 		wait := backoff + jitter
-		if wait > e.cfg.ConnectIP.MaxReconnectDelay {
-			wait = e.cfg.ConnectIP.MaxReconnectDelay
+		if wait > e.cfg.ConnectIP.MaxReconnectDelay.Duration {
+			wait = e.cfg.ConnectIP.MaxReconnectDelay.Duration
 		}
 		log.Printf("[engine] reconnecting in %v", wait)
 
@@ -435,9 +435,9 @@ func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool
 
 // waitAndConfigureTUN 等待服务端的 ADDRESS_ASSIGN capsule，用分配的 IP 配置 TUN。
 func (e *Engine) waitAndConfigureTUN(ctx context.Context, session *connectip.Session) error {
-	log.Printf("[engine] waiting for ADDRESS_ASSIGN from server (timeout=%v)", e.cfg.ConnectIP.AddressAssignTimeout)
+	log.Printf("[engine] waiting for ADDRESS_ASSIGN from server (timeout=%v)", e.cfg.ConnectIP.AddressAssignTimeout.Duration)
 
-	assignCtx, cancel := context.WithTimeout(ctx, e.cfg.ConnectIP.AddressAssignTimeout)
+	assignCtx, cancel := context.WithTimeout(ctx, e.cfg.ConnectIP.AddressAssignTimeout.Duration)
 	defer cancel()
 
 	prefixes, err := session.LocalPrefixes(assignCtx)
