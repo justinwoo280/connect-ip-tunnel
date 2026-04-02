@@ -30,7 +30,7 @@ COPY --from=builder /out/connect-ip-tunnel /usr/local/bin/connect-ip-tunnel
 # 默认配置目录
 RUN mkdir -p /etc/connect-ip-tunnel/certs
 
-WORKDIR /etc/connect-ip-tunnel
+WORKDIR /app
 
 # 暴露端口：
 #   443  → QUIC/HTTP3 主服务
