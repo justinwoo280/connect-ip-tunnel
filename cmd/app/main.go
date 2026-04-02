@@ -21,7 +21,8 @@ import (
 var Version = "dev"
 
 func main() {
-	configPath := flag.String("c", "", "config file path (JSON)")
+	configPath := flag.String("config", "", "config file path (JSON)")
+	flag.StringVar(configPath, "c", "", "config file path (JSON, shorthand for --config)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
