@@ -202,11 +202,12 @@ gen_server_config() {
     fi
 
     # 构建 crl_url（certsrv 启用时自动配置）
+    # 注意：session_cache_size 后面需要逗号，crl_interval 末尾不能有逗号（JSON 不支持 trailing comma）
     local crl_config=""
     if [[ "$CERTSRV_ENABLED" == "true" && -n "$CERTSRV_PORT" ]]; then
-        crl_config="
+        crl_config=",
       \"crl_url\":             \"https://127.0.0.1:${CERTSRV_PORT}/crl.pem\",
-      \"crl_interval\":        \"10m\","
+      \"crl_interval\":        \"10m\""
     fi
 
     cat > "$config_file" <<EOF
