@@ -84,6 +84,19 @@ func (rm *RoutingManager) Setup(enableNAT bool, natInterface string) error {
 		log.Printf("[routing] tun ipv6: %s", rm.tunIPv6)
 	}
 
+	// 没有配置 TUN IP 时，也需要确保设备处于 UP 状态，否则后续 ip route add 会失败
+	if !rm.tunIPv4.IsValid() && !rm.tunIPv6.IsValid() {
+		if runtime.GOOS == "linux" {
+			cmd := exec.Command("ip", "link", "set", rm.tunIfName, "up")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("[routing] warning: ip link set %s up: %v (output: %s)", rm.tunIfName, err, string(out))
+			}
+			if err := rm.waitLinkUp(rm.tunIfName, 2*time.Second); err != nil {
+				log.Printf("[routing] warning: %v, proceeding anyway", err)
+			}
+		}
+	}
+
 	// 2. 添加客户端地址池路由（指向 TUN 设备）
 	for _, pool := range rm.clientPool {
 		if err := rm.addClientPoolRoute(pool); err != nil {
