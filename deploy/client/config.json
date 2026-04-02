@@ -25,12 +25,14 @@
       "max_conn_window":         134217728
     },
     "connect_ip": {
-      "addr":                  "server:443",
-      "uri":                   "/.well-known/masque/ip",
-      "authority":             "server.connect-ip.local",
-      "enable_reconnect":      true,
-      "max_reconnect_delay":   "30s",
-      "num_sessions":          4
+      "addr":                     "server:443",
+      "uri":                      "/.well-known/masque/ip",
+      "authority":                "server.connect-ip.local",
+      "wait_for_address_assign":  true,
+      "address_assign_timeout":   "30s",
+      "enable_reconnect":         true,
+      "max_reconnect_delay":      "30s",
+      "num_sessions":             4
     }
   }
 }
