@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // RoutingManager 管理服务端路由配置
@@ -155,7 +156,10 @@ func (rm *RoutingManager) setTunIPLinux(prefix netip.Prefix, isIPv6 bool) error 
 	// ip addr add <prefix> dev <ifname>
 	cmd := exec.Command("ip", "addr", "add", prefix.String(), "dev", rm.tunIfName)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ip addr add: %w (output: %s)", err, string(out))
+		// 忽略地址已存在的错误
+		if !strings.Contains(string(out), "File exists") && !strings.Contains(string(out), "RTNETLINK answers: File exists") {
+			return fmt.Errorf("ip addr add: %w (output: %s)", err, string(out))
+		}
 	}
 
 	// ip link set <ifname> up
@@ -164,8 +168,26 @@ func (rm *RoutingManager) setTunIPLinux(prefix netip.Prefix, isIPv6 bool) error 
 		return fmt.Errorf("ip link set up: %w (output: %s)", err, string(out))
 	}
 
+	// 等待设备进入 UP 状态（最多 2 秒），避免后续 ip route add 报 "Device not up"
+	if err := rm.waitLinkUp(rm.tunIfName, 2*time.Second); err != nil {
+		log.Printf("[routing] warning: %v, proceeding anyway", err)
+	}
+
 	_ = family // 避免未使用警告
 	return nil
+}
+
+// waitLinkUp 轮询等待网络设备进入 UP 状态
+func (rm *RoutingManager) waitLinkUp(ifname string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("ip", "link", "show", ifname).Output()
+		if err == nil && (strings.Contains(string(out), "state UP") || strings.Contains(string(out), "state UNKNOWN")) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s to come up", ifname)
 }
 
 func (rm *RoutingManager) setTunIPDarwin(prefix netip.Prefix, isIPv6 bool) error {

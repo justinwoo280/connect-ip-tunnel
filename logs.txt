@@ -1,0 +1,7 @@
+2026/04/02 12:07:05 connect-ip-tunnel dev starting in server mode
+2026/04/02 12:07:05 [server] starting on :26612
+2026/04/02 12:07:05 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
+2026/04/02 12:07:05 [routing] setting up server routing for tun0
+2026/04/02 12:07:05 [routing] tearing down server routing for tun0
+2026/04/02 12:07:05 start server failed: server: setup routing: add client pool route 10.233.0.0/16: ip route add: exit status 2 (output: Error: Device for nexthop is not up.
+)
