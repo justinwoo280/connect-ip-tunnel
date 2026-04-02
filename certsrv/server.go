@@ -91,11 +91,13 @@ func (s *Server) Close() error {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// 静态文件（内嵌）
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
+	// 静态文件（内嵌）— 不带方法前缀，兼容 HEAD/GET
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
+
+	// 首页
+	mux.HandleFunc("GET /{$}", s.handleIndex)
 
 	// 公开接口
-	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("POST /logout", s.handleLogout)

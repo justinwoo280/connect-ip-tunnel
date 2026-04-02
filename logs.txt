@@ -1,14 +1,15 @@
-2026/04/02 12:27:35 connect-ip-tunnel dev starting in server mode
-2026/04/02 12:27:35 [server] starting on :26612
-2026/04/02 12:27:35 [server] ip pool ready: ipv4=10.233.0.0/16 ipv6=fd00::/64
-2026/04/02 12:27:35 [routing] setting up server routing for tun0
-2026/04/02 12:27:35 [routing] client pool route: 10.233.0.0/16 -> tun0
-2026/04/02 12:27:35 [routing] client pool route: fd00::/64 -> tun0
-2026/04/02 12:27:35 [routing] ip forwarding enabled
-2026/04/02 12:27:35 [routing] nat enabled: tun0 -> enp0s6
-2026/04/02 12:27:35 [server] tun ready: if=tun0 mtu=1400
-2026/04/02 12:27:35 WARN initial CRL fetch failed, will retry in background (connections allowed until CRL is available) url=https://127.0.0.1:8443/crl.pem err="http get: Get \"https://127.0.0.1:8443/crl.pem\": dial tcp 127.0.0.1:8443: connect: connection refused"
-2026/04/02 12:27:35 [server] mTLS enabled, client certificates required
-2026/04/02 12:27:35 [server] started: listen=:26612 tun=tun0
-2026/04/02 12:27:35 [server] admin/metrics listening on :9090
-2026/04/02 12:27:35 start certsrv failed: certsrv: init CA: initial CRL: create CRL: x509: template contains nil Number field
+goroutine 1 [running]:
+net/http.(*ServeMux).register(...)
+        net/http/server.go:2911
+net/http.(*ServeMux).HandleFunc(0x888880?, {0x92c1ed?, 0x90?}, 0xa78d40?)
+        net/http/server.go:2885 +0x74
+connect-ip-tunnel/certsrv.(*Server).routes(0x40000f81b0)
+        connect-ip-tunnel/certsrv/server.go:98 +0x15c
+connect-ip-tunnel/certsrv.New({{0x400017e3d0, 0x5}, {0x4000094c00, 0x25}, {0x4000094c30, 0x23}, {0x4000094c60, 0x23}, {0x4000094b70, 0x27}, ...}, ...)
+        connect-ip-tunnel/certsrv/server.go:60 +0x24c
+main.startCertSrv({{0x400017e386, 0x6}, {0x4000038e28, 0x16}, {0x400017e390, 0x5}, {{0x400017e398, 0x4}, 0x578, 0x0, ...}, ...})
+        connect-ip-tunnel/cmd/app/main.go:147 +0x110
+main.runServer({{0x400017e386, 0x6}, {0x4000038e28, 0x16}, {0x400017e390, 0x5}, {{0x400017e398, 0x4}, 0x578, 0x0, ...}, ...})
+        connect-ip-tunnel/cmd/app/main.go:100 +0x11c
+main.main()
+        connect-ip-tunnel/cmd/app/main.go:55 +0x47c
