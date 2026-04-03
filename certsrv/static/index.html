@@ -177,11 +177,20 @@ function openRevokeModal(serial) {
 function closeRevokeModal() {
   document.getElementById('revoke-modal').classList.add('hidden');
 }
+function getCsrfToken() {
+  const m = document.cookie.split(';').map(c => c.trim())
+    .find(c => c.startsWith('certsrv_session='));
+  return m ? m.split('=')[1].substring(0, 16) : '';
+}
+
 async function confirmRevoke() {
   const reason = document.getElementById('revoke-reason').value || 'unspecified';
   const res = await fetch('/api/v1/certs/revoke', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': getCsrfToken(),
+    },
     body: JSON.stringify({serial: revokeSerial, reason})
   });
   closeRevokeModal();

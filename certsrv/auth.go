@@ -24,8 +24,9 @@ const (
 // ── Session Store（内存）────────────────────────────────────────────────────
 
 type session struct {
-	username  string
-	expiresAt time.Time
+	username    string
+	expiresAt   time.Time
+	totpSecret  string // 临时存储待确认的 TOTP secret，确认后清除
 }
 
 type sessionStore struct {
@@ -63,6 +64,31 @@ func (s *sessionStore) delete(token string) {
 	s.mu.Unlock()
 }
 
+// setTOTPSecret 将待确认的 TOTP secret 存入 session（服务端保存，不信任客户端）
+func (s *sessionStore) setTOTPSecret(token, secret string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.data[token]
+	if !ok || time.Now().After(sess.expiresAt) {
+		return false
+	}
+	sess.totpSecret = secret
+	return true
+}
+
+// popTOTPSecret 取出并清除 session 中的待确认 TOTP secret（一次性）
+func (s *sessionStore) popTOTPSecret(token string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.data[token]
+	if !ok || time.Now().After(sess.expiresAt) || sess.totpSecret == "" {
+		return "", false
+	}
+	secret := sess.totpSecret
+	sess.totpSecret = "" // 清除，防止重放
+	return secret, true
+}
+
 func (s *sessionStore) gc() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
@@ -78,15 +104,97 @@ func (s *sessionStore) gc() {
 	}
 }
 
+// ── Rate Limiter（登录暴力破解防护）─────────────────────────────────────────
+
+const (
+	maxLoginAttempts = 10              // 每个 IP 最大失败次数
+	loginLockout     = 15 * time.Minute // 锁定时间
+)
+
+type loginAttempt struct {
+	count     int
+	lockedAt  time.Time
+	firstFail time.Time
+}
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]*loginAttempt
+}
+
+func newRateLimiter() *rateLimiter {
+	rl := &rateLimiter{attempts: make(map[string]*loginAttempt)}
+	go rl.gc()
+	return rl
+}
+
+// Allow 检查 IP 是否允许登录，返回 false 表示被限速
+func (rl *rateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	a, ok := rl.attempts[ip]
+	if !ok {
+		return true
+	}
+	if !a.lockedAt.IsZero() {
+		// 锁定中：检查是否已过锁定期
+		if time.Since(a.lockedAt) > loginLockout {
+			delete(rl.attempts, ip)
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// RecordFailure 记录登录失败
+func (rl *rateLimiter) RecordFailure(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	a, ok := rl.attempts[ip]
+	if !ok {
+		a = &loginAttempt{firstFail: time.Now()}
+		rl.attempts[ip] = a
+	}
+	a.count++
+	if a.count >= maxLoginAttempts {
+		a.lockedAt = time.Now()
+	}
+}
+
+// RecordSuccess 登录成功，清除计数
+func (rl *rateLimiter) RecordSuccess(ip string) {
+	rl.mu.Lock()
+	delete(rl.attempts, ip)
+	rl.mu.Unlock()
+}
+
+func (rl *rateLimiter) gc() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		rl.mu.Lock()
+		for ip, a := range rl.attempts {
+			if !a.lockedAt.IsZero() && time.Since(a.lockedAt) > loginLockout {
+				delete(rl.attempts, ip)
+			} else if a.lockedAt.IsZero() && time.Since(a.firstFail) > loginLockout {
+				delete(rl.attempts, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
 // ── Auth 核心逻辑 ────────────────────────────────────────────────────────────
 
 type authService struct {
 	db       *DB
 	sessions *sessionStore
+	limiter  *rateLimiter
 }
 
 func newAuthService(db *DB) *authService {
-	return &authService{db: db, sessions: newSessionStore()}
+	return &authService{db: db, sessions: newSessionStore(), limiter: newRateLimiter()}
 }
 
 // EnsureDefaultAdmin 确保数据库里有默认 admin 账号
@@ -107,28 +215,38 @@ func (a *authService) EnsureDefaultAdmin() error {
 
 // Login 验证用户名+密码+TOTP，返回 session token
 // 返回 needSetup=true 表示需要首次初始化
-func (a *authService) Login(username, password, totpCode string) (token string, needSetup bool, err error) {
+// ip 用于速率限制（传 r.RemoteAddr 或 X-Real-IP）
+func (a *authService) Login(username, password, totpCode, ip string) (token string, needSetup bool, err error) {
+	// 速率限制检查
+	if !a.limiter.Allow(ip) {
+		return "", false, fmt.Errorf("too many login attempts, please try again later")
+	}
+
 	admin, err := a.db.GetAdmin(username)
 	if err != nil {
 		return "", false, err
 	}
 	if admin == nil {
+		a.limiter.RecordFailure(ip)
 		return "", false, fmt.Errorf("invalid credentials")
 	}
 
-	// 验证密码
+	// 验证密码（恒定时间比较，防止时序攻击）
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PassHash), []byte(password)); err != nil {
+		a.limiter.RecordFailure(ip)
 		return "", false, fmt.Errorf("invalid credentials")
 	}
 
 	// 首次登录，跳过 TOTP，直接返回临时 session 用于初始化
 	if admin.FirstLogin {
+		a.limiter.RecordSuccess(ip)
 		token = a.sessions.create(username)
 		return token, true, nil
 	}
 
 	// 验证 TOTP
 	if !admin.TOTPEnabled {
+		a.limiter.RecordFailure(ip)
 		return "", false, fmt.Errorf("TOTP not configured")
 	}
 	valid, err := totp.ValidateCustom(totpCode, admin.TOTPSecret, time.Now(), totp.ValidateOpts{
@@ -138,9 +256,11 @@ func (a *authService) Login(username, password, totpCode string) (token string, 
 		Algorithm: otp.AlgorithmSHA1,
 	})
 	if err != nil || !valid {
+		a.limiter.RecordFailure(ip)
 		return "", false, fmt.Errorf("invalid TOTP code")
 	}
 
+	a.limiter.RecordSuccess(ip)
 	token = a.sessions.create(username)
 	return token, false, nil
 }
@@ -170,7 +290,8 @@ func (a *authService) SetSessionCookie(w http.ResponseWriter, token string) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   true, // 仅通过 HTTPS 传输，防止明文泄露
+		SameSite: http.SameSiteStrictMode, // Strict 比 Lax 更安全，防 CSRF
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
 }
@@ -182,6 +303,7 @@ func (a *authService) ClearSessionCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   true,
 		MaxAge:   -1,
 	})
 }

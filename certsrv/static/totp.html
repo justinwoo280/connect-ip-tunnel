@@ -47,17 +47,14 @@
       <div class="inline-block p-3 bg-white rounded-xl">
         <img src="data:image/png;base64,{{.qrBase64}}" alt="TOTP QR Code" class="w-48 h-48">
       </div>
-      <!-- 手动输入 secret -->
+      <!-- secret 不在前端展示，仅通过 QR 码扫描绑定 -->
       <div class="mt-4">
-        <p class="text-xs text-gray-500 mb-1">或手动输入密钥：</p>
-        <code class="text-xs bg-gray-800 px-3 py-1.5 rounded-lg text-indigo-300 tracking-widest select-all">
-          {{.secret}}
-        </code>
+        <p class="text-xs text-gray-500">请使用验证器 App 扫描上方二维码</p>
       </div>
     </div>
 
     <form method="POST" action="/setup/totp" class="space-y-5">
-      <input type="hidden" name="secret" value="{{.secret}}">
+      <!-- _csrf 由 JS 自动注入，secret 不再由客户端提交（服务端 session 保存）-->
       <div>
         <label class="block text-sm font-medium text-gray-300 mb-1.5">输入验证码确认绑定</label>
         <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
@@ -76,5 +73,21 @@
     </form>
   </div>
 </div>
+<script>
+// 自动为所有 POST form 注入 CSRF token（取 session cookie 前 16 字节）
+(function() {
+  const m = document.cookie.split(';').map(c => c.trim())
+    .find(c => c.startsWith('certsrv_session='));
+  if (!m) return;
+  const csrf = m.split('=')[1].substring(0, 16);
+  document.querySelectorAll('form[method="POST"],form[method="post"]').forEach(f => {
+    if (!f.querySelector('[name="_csrf"]')) {
+      const i = document.createElement('input');
+      i.type = 'hidden'; i.name = '_csrf'; i.value = csrf;
+      f.appendChild(i);
+    }
+  });
+})();
+</script>
 </body>
 </html>

@@ -99,12 +99,12 @@ func (s *Server) routes() http.Handler {
 
 	// 公开接口
 	mux.HandleFunc("GET /login", s.handleLoginPage)
-	mux.HandleFunc("POST /login", s.handleLogin)
-	mux.HandleFunc("POST /logout", s.handleLogout)
+	mux.HandleFunc("POST /login", s.handleLogin)           // login 自带 rate limit，无需 CSRF（未登录）
+	mux.HandleFunc("POST /logout", s.csrfProtect(s.handleLogout))
 	mux.HandleFunc("GET /setup", s.handleSetupPage)
-	mux.HandleFunc("POST /setup", s.handleSetup)
+	mux.HandleFunc("POST /setup", s.csrfProtect(s.handleSetup))
 	mux.HandleFunc("GET /setup/totp", s.handleTOTPPage)
-	mux.HandleFunc("POST /setup/totp", s.handleTOTPConfirm)
+	mux.HandleFunc("POST /setup/totp", s.csrfProtect(s.handleTOTPConfirm))
 
 	// CRL（公开，供服务端拉取）
 	mux.HandleFunc("GET /crl.pem", s.handleCRL)
@@ -113,11 +113,11 @@ func (s *Server) routes() http.Handler {
 	// 需要登录的接口
 	mux.HandleFunc("GET /certs", s.requireAuth(s.handleCertList))
 	mux.HandleFunc("GET /certs/issue", s.requireAuth(s.handleIssuePage))
-	mux.HandleFunc("POST /certs/issue", s.requireAuth(s.handleIssue))
-	mux.HandleFunc("POST /certs/revoke", s.requireAuth(s.handleRevoke))
+	mux.HandleFunc("POST /certs/issue", s.requireAuth(s.csrfProtect(s.handleIssue)))
+	mux.HandleFunc("POST /certs/revoke", s.requireAuth(s.csrfProtect(s.handleRevoke)))
 	mux.HandleFunc("GET /certs/download/{serial}", s.requireAuth(s.handleDownload))
 
-	// API（JSON）
+	// API（JSON）— Bearer token 场景不需要 CSRF，但需要登录
 	mux.HandleFunc("GET /api/v1/certs", s.requireAuth(s.apiListCerts))
 	mux.HandleFunc("POST /api/v1/certs/issue", s.requireAuth(s.apiIssueCert))
 	mux.HandleFunc("POST /api/v1/certs/revoke", s.requireAuth(s.apiRevokeCert))
@@ -133,6 +133,41 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !ok {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
+		}
+		next(w, r)
+	}
+}
+
+// csrfProtect 对所有需要登录的 POST 请求验证 CSRF token。
+// token 由前端表单的隐藏字段 _csrf 携带，值与 session cookie 绑定。
+// 利用 SameSite=Strict cookie 已经提供基础防护，此处作为额外防御层。
+func (s *Server) csrfProtect(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			cookie, err := r.Cookie(sessionCookieName)
+			if err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			expected := cookie.Value
+			if len(expected) > 16 {
+				expected = expected[:16]
+			}
+			// 支持两种方式提交 CSRF token：
+			// 1. form 隐藏字段 _csrf（HTML form 表单）
+			// 2. X-CSRF-Token header（fetch/XHR JSON 请求）
+			formToken := r.FormValue("_csrf")
+			headerToken := r.Header.Get("X-CSRF-Token")
+			token := formToken
+			if token == "" {
+				token = headerToken
+			}
+			if token != expected {
+				s.log.Warn("CSRF check failed", "ip", r.RemoteAddr,
+					"has_form", formToken != "", "has_header", headerToken != "")
+				http.Error(w, "forbidden: invalid CSRF token", http.StatusForbidden)
+				return
+			}
 		}
 		next(w, r)
 	}
@@ -162,9 +197,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	totpCode := r.FormValue("totp")
 
-	token, needSetup, err := s.auth.Login(username, password, totpCode)
+	// 取真实客户端 IP（兼容反向代理）
+	ip := r.RemoteAddr
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		ip = strings.SplitN(xff, ",", 2)[0]
+	} else if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		ip = xri
+	}
+
+	token, needSetup, err := s.auth.Login(username, password, totpCode, ip)
 	if err != nil {
-		s.log.Warn("login failed", "username", username, "err", err)
+		s.log.Warn("login failed", "username", username, "ip", ip, "err", err)
+		// 统一返回 error=1，不泄露具体原因（防止用户名枚举）
 		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
 		return
 	}
@@ -223,9 +267,15 @@ func (s *Server) handleTOTPPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 将 secret 和 QR 码传给前端
+	// ⚠️ 安全修复：secret 存入服务端 session，不暴露给客户端（除了 QR 码）
+	// 防止客户端篡改 secret 来绕过 MFA
+	cookie, _ := r.Cookie(sessionCookieName)
+	if cookie != nil {
+		s.auth.sessions.setTOTPSecret(cookie.Value, secret)
+	}
+
+	// 只将 QR 码传给前端，secret 不再暴露
 	data := map[string]string{
-		"secret":   secret,
 		"qrBase64": qrBase64,
 	}
 	serveHTMLWithData(w, "totp.html", data)
@@ -238,9 +288,21 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret := r.FormValue("secret")
-	code := r.FormValue("code")
+	// ⚠️ 安全修复：从服务端 session 取 secret，忽略客户端传来的 secret 字段
+	// 防止攻击者伪造 secret 绑定自己的 TOTP
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	secret, ok := s.auth.sessions.popTOTPSecret(cookie.Value)
+	if !ok {
+		// secret 不存在或已过期（需要重新访问 /setup/totp 生成）
+		http.Redirect(w, r, "/setup/totp?error=expired", http.StatusSeeOther)
+		return
+	}
 
+	code := r.FormValue("code")
 	if err := s.auth.ConfirmTOTP(username, secret, code); err != nil {
 		http.Redirect(w, r, "/setup/totp?error=1", http.StatusSeeOther)
 		return
@@ -256,18 +318,62 @@ func (s *Server) handleIssuePage(w http.ResponseWriter, r *http.Request) {
 	serveHTML(w, "issue.html")
 }
 
+// validateCN 校验证书 CN 字段：仅允许字母、数字、连字符、下划线、点，长度 1-64
+func validateCN(cn string) error {
+	if len(cn) == 0 || len(cn) > 64 {
+		return fmt.Errorf("CN must be 1-64 characters")
+	}
+	for _, c := range cn {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+			return fmt.Errorf("CN contains invalid character: %q", c)
+		}
+	}
+	return nil
+}
+
+// validateSerial 校验 serial：纯十六进制字符串
+func validateSerial(serial string) error {
+	if len(serial) == 0 || len(serial) > 64 {
+		return fmt.Errorf("invalid serial")
+	}
+	for _, c := range serial {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return fmt.Errorf("invalid serial format")
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 	cn := strings.TrimSpace(r.FormValue("cn"))
 	note := strings.TrimSpace(r.FormValue("note"))
+
+	// 输入校验
+	if err := validateCN(cn); err != nil {
+		http.Redirect(w, r, "/certs/issue?error=invalid_cn", http.StatusSeeOther)
+		return
+	}
+	if len(note) > 256 {
+		note = note[:256]
+	}
+
 	days := 365
 	if d := r.FormValue("days"); d != "" {
 		fmt.Sscanf(d, "%d", &days)
 	}
+	if days < 1 {
+		days = 1
+	}
+	if days > 3650 { // 最长 10 年
+		days = 3650
+	}
 
 	cert, err := s.ca.IssueCert(cn, note, days)
 	if err != nil {
-		s.log.Error("issue cert failed", "err", err)
-		http.Redirect(w, r, "/certs/issue?error="+err.Error(), http.StatusSeeOther)
+		s.log.Error("issue cert failed", "cn", cn, "err", err)
+		// 不暴露内部错误详情
+		http.Redirect(w, r, "/certs/issue?error=issue_failed", http.StatusSeeOther)
 		return
 	}
 
@@ -281,13 +387,28 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	serial := r.FormValue("serial")
 	reason := r.FormValue("reason")
+
+	// serial 格式校验，防止注入
+	if err := validateSerial(serial); err != nil {
+		http.Error(w, "invalid serial", http.StatusBadRequest)
+		return
+	}
 	if reason == "" {
+		reason = "unspecified"
+	}
+	// reason 白名单
+	validReasons := map[string]bool{
+		"unspecified": true, "keyCompromise": true,
+		"caCompromise": true, "affiliationChanged": true,
+		"superseded": true, "cessationOfOperation": true,
+	}
+	if !validReasons[reason] {
 		reason = "unspecified"
 	}
 
 	if err := s.ca.RevokeCert(serial, reason); err != nil {
 		s.log.Error("revoke cert failed", "serial", serial, "err", err)
-		http.Error(w, "revoke failed: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "revoke failed", http.StatusBadRequest) // 不暴露内部错误
 		return
 	}
 	http.Redirect(w, r, "/certs?revoked=1", http.StatusSeeOther)
@@ -403,12 +524,23 @@ func (s *Server) apiIssueCert(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if req.Days == 0 {
+	if err := validateCN(req.CN); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Days <= 0 {
 		req.Days = 365
+	}
+	if req.Days > 3650 {
+		req.Days = 3650
+	}
+	if len(req.Note) > 256 {
+		req.Note = req.Note[:256]
 	}
 	cert, err := s.ca.IssueCert(req.CN, req.Note, req.Days)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		s.log.Error("api issue cert failed", "cn", req.CN, "err", err)
+		jsonError(w, "issue failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, cert)
@@ -425,8 +557,16 @@ func (s *Server) apiRevokeCert(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	if err := validateSerial(req.Serial); err != nil {
+		jsonError(w, "invalid serial", http.StatusBadRequest)
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "unspecified"
+	}
 	if err := s.ca.RevokeCert(req.Serial, req.Reason); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		s.log.Error("api revoke cert failed", "serial", req.Serial, "err", err)
+		jsonError(w, "revoke failed", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "revoked"})
