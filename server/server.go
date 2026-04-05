@@ -191,8 +191,11 @@ func (s *Server) Start() error {
 		s.listener = listener
 
 		// 5. 启动 HTTP/3 服务器
+		// EnableDatagrams 必须与 QUIC 层的 EnableDatagrams 一致，
+		// Connect-IP 使用 HTTP/3 Datagram（RFC 9297）转发 IP 包。
 		s.httpServer = &qhttp3.Server{
-			Handler: s,
+			Handler:         s,
+			EnableDatagrams: true,
 		}
 
 		go func() {
