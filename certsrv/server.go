@@ -1,8 +1,6 @@
 package certsrv
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +18,14 @@ type Config struct {
 	CAKeyFile  string `json:"ca_key_file"`  // CA 私钥路径
 	TLSCert    string `json:"tls_cert"`     // certsrv 自身 HTTPS 证书（可复用 server.crt）
 	TLSKey     string `json:"tls_key"`      // certsrv 自身 HTTPS 私钥
+
+	// 审计日志轮转
+	AuditLogDir     string // JSONL 导出目录，留空则只删不导出
+	AuditRetainDays int    // DB 内保留天数，默认 30
+
+	// TrustedProxy 为 true 时才信任 X-Forwarded-For / X-Real-IP 头取客户端 IP。
+	// 仅在 certsrv 前有可信反向代理时开启，否则攻击者可伪造头绕过登录限速。
+	TrustedProxy bool
 }
 
 // Server 是 certsrv 的主服务
@@ -62,7 +68,43 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+
+	// 启动审计日志轮转后台任务（每天凌晨 2:00 UTC 执行）
+	go s.auditRotateLoop()
+
 	return s, nil
+}
+
+// auditRotateLoop 每天凌晨 2:00 UTC 执行一次审计日志轮转。
+// 将超过保留期的记录导出为 JSONL 文件（若配置了 AuditLogDir）后从 DB 删除。
+func (s *Server) auditRotateLoop() {
+	for {
+		now := time.Now().UTC()
+		// 计算下一个凌晨 2:00 UTC
+		next := time.Date(now.Year(), now.Month(), now.Day(), 2, 0, 0, 0, time.UTC)
+		if !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
+		timer := time.NewTimer(next.Sub(now))
+		<-timer.C
+		timer.Stop()
+
+		retainDays := s.cfg.AuditRetainDays
+		if retainDays <= 0 {
+			retainDays = 30
+		}
+		exported, deleted, err := s.db.RotateAuditLog(s.cfg.AuditLogDir, retainDays)
+		if err != nil {
+			s.log.Error("audit rotate failed", "err", err)
+		} else if deleted > 0 {
+			s.log.Info("audit log rotated",
+				"exported", exported,
+				"deleted", deleted,
+				"retain_days", retainDays,
+				"dir", s.cfg.AuditLogDir,
+			)
+		}
+	}
 }
 
 // Start 启动 HTTPS 服务（阻塞）
@@ -101,10 +143,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLogin)           // login 自带 rate limit，无需 CSRF（未登录）
 	mux.HandleFunc("POST /logout", s.csrfProtect(s.handleLogout))
-	mux.HandleFunc("GET /setup", s.handleSetupPage)
-	mux.HandleFunc("POST /setup", s.csrfProtect(s.handleSetup))
-	mux.HandleFunc("GET /setup/totp", s.handleTOTPPage)
-	mux.HandleFunc("POST /setup/totp", s.csrfProtect(s.handleTOTPConfirm))
+	mux.HandleFunc("GET /setup", s.requireAuth(s.handleSetupPage))
+	mux.HandleFunc("POST /setup", s.requireAuth(s.csrfProtect(s.handleSetup)))
+	mux.HandleFunc("GET /setup/totp", s.requireAuth(s.handleTOTPPage))
+	mux.HandleFunc("POST /setup/totp", s.requireAuth(s.csrfProtect(s.handleTOTPConfirm)))
 
 	// CRL（公开，供服务端拉取）
 	mux.HandleFunc("GET /crl.pem", s.handleCRL)
@@ -149,10 +191,8 @@ func (s *Server) csrfProtect(next http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
+			// 使用完整 session token 做 CSRF 比较，不截断，保持 256bit 熵
 			expected := cookie.Value
-			if len(expected) > 16 {
-				expected = expected[:16]
-			}
 			// 支持两种方式提交 CSRF token：
 			// 1. form 隐藏字段 _csrf（HTML form 表单）
 			// 2. X-CSRF-Token header（fetch/XHR JSON 请求）
@@ -163,7 +203,7 @@ func (s *Server) csrfProtect(next http.HandlerFunc) http.HandlerFunc {
 				token = headerToken
 			}
 			if token != expected {
-				s.log.Warn("CSRF check failed", "ip", r.RemoteAddr,
+				s.log.Warn("CSRF check failed", "ip", s.clientIP(r),
 					"has_form", formToken != "", "has_header", headerToken != "")
 				http.Error(w, "forbidden: invalid CSRF token", http.StatusForbidden)
 				return
@@ -197,22 +237,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	totpCode := r.FormValue("totp")
 
-	// 取真实客户端 IP（兼容反向代理）
-	ip := r.RemoteAddr
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ip = strings.SplitN(xff, ",", 2)[0]
-	} else if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		ip = xri
-	}
+	ip := s.clientIP(r)
 
 	token, needSetup, err := s.auth.Login(username, password, totpCode, ip)
 	if err != nil {
 		s.log.Warn("login failed", "username", username, "ip", ip, "err", err)
+		s.db.InsertAuditLog("login_fail", username, ip, err.Error(), false)
 		// 统一返回 error=1，不泄露具体原因（防止用户名枚举）
 		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
 		return
 	}
 
+	if needSetup {
+		s.db.InsertAuditLog("login_ok", username, ip, "first login, redirect to setup", true)
+	} else {
+		s.db.InsertAuditLog("login_ok", username, ip, "", true)
+	}
 	s.auth.SetSessionCookie(w, token)
 	if needSetup {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
@@ -222,9 +262,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	username, _ := s.auth.GetSessionUser(r)
+	ip := s.clientIP(r)
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		s.auth.Logout(cookie.Value)
 	}
+	s.db.InsertAuditLog("logout", username, ip, "", true)
 	s.auth.ClearSessionCookie(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -239,18 +282,23 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	ip := s.clientIP(r)
 
 	newPass := r.FormValue("password")
 	confirmPass := r.FormValue("confirm_password")
 
 	if newPass != confirmPass {
+		s.db.InsertAuditLog("password_change", username, ip, "password mismatch", false)
 		http.Redirect(w, r, "/setup?error=password_mismatch", http.StatusSeeOther)
 		return
 	}
 	if err := s.auth.ChangePassword(username, newPass); err != nil {
-		http.Redirect(w, r, "/setup?error="+err.Error(), http.StatusSeeOther)
+		s.db.InsertAuditLog("password_change", username, ip, err.Error(), false)
+		// 不将内部错误暴露到 URL，只返回通用错误码
+		http.Redirect(w, r, "/setup?error=change_failed", http.StatusSeeOther)
 		return
 	}
+	s.db.InsertAuditLog("password_change", username, ip, "", true)
 	http.Redirect(w, r, "/setup/totp", http.StatusSeeOther)
 }
 
@@ -287,6 +335,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	ip := s.clientIP(r)
 
 	// ⚠️ 安全修复：从服务端 session 取 secret，忽略客户端传来的 secret 字段
 	// 防止攻击者伪造 secret 绑定自己的 TOTP
@@ -304,9 +353,11 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 
 	code := r.FormValue("code")
 	if err := s.auth.ConfirmTOTP(username, secret, code); err != nil {
+		s.db.InsertAuditLog("totp_bind", username, ip, "invalid TOTP code", false)
 		http.Redirect(w, r, "/setup/totp?error=1", http.StatusSeeOther)
 		return
 	}
+	s.db.InsertAuditLog("totp_bind", username, ip, "", true)
 	http.Redirect(w, r, "/certs", http.StatusSeeOther)
 }
 
@@ -369,13 +420,16 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 		days = 3650
 	}
 
+	username, _ := s.auth.GetSessionUser(r)
 	cert, err := s.ca.IssueCert(cn, note, days)
 	if err != nil {
 		s.log.Error("issue cert failed", "cn", cn, "err", err)
+		s.db.InsertAuditLog("cert_issue", username, s.clientIP(r), "cn="+cn+" err="+err.Error(), false)
 		// 不暴露内部错误详情
 		http.Redirect(w, r, "/certs/issue?error=issue_failed", http.StatusSeeOther)
 		return
 	}
+	s.db.InsertAuditLog("cert_issue", username, s.clientIP(r), "cn="+cn+" serial="+cert.Serial, true)
 
 	// 私钥存入一次性 token store（10分钟有效，取出即删）
 	token := s.keys.put(cert.KeyPEM)
@@ -406,16 +460,25 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		reason = "unspecified"
 	}
 
+	username, _ := s.auth.GetSessionUser(r)
 	if err := s.ca.RevokeCert(serial, reason); err != nil {
 		s.log.Error("revoke cert failed", "serial", serial, "err", err)
+		s.db.InsertAuditLog("cert_revoke", username, s.clientIP(r), "serial="+serial+" err="+err.Error(), false)
 		http.Error(w, "revoke failed", http.StatusBadRequest) // 不暴露内部错误
 		return
 	}
+	s.db.InsertAuditLog("cert_revoke", username, s.clientIP(r), "serial="+serial+" reason="+reason, true)
 	http.Redirect(w, r, "/certs?revoked=1", http.StatusSeeOther)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	serial := r.PathValue("serial")
+
+	// 格式校验，与 handleRevoke / apiRevokeCert 保持一致
+	if err := validateSerial(serial); err != nil {
+		http.NotFound(w, r)
+		return
+	}
 
 	// 检查是否请求特定文件（直接下载，不需要token）
 	switch r.URL.Query().Get("file") {
@@ -455,33 +518,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDownloadZip 打包下载（POST，需要私钥——私钥在签发时一次性返回，这里无法重新获取）
-// 实际上需要在签发时就提供下载，这里仅提供 cert + ca
-func (s *Server) handleDownloadZip(w http.ResponseWriter, r *http.Request) {
-	serial := r.PathValue("serial")
-	cert, err := s.db.GetCertBySerial(serial)
-	if err != nil || cert == nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-
-	addFile := func(name, content string) {
-		f, _ := zw.Create(name)
-		f.Write([]byte(content))
-	}
-
-	addFile("client.crt", cert.CertPEM)
-	addFile("ca.crt", string(s.ca.CACertPEM()))
-	addFile("config-template.json", clientConfigTemplate(cert.CN))
-	zw.Close()
-
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="connect-ip-client-%s.zip"`, cert.CN))
-	w.Write(buf.Bytes())
-}
 
 // ── 公开端点 ──────────────────────────────────────────────────────────────────
 
@@ -537,12 +573,15 @@ func (s *Server) apiIssueCert(w http.ResponseWriter, r *http.Request) {
 	if len(req.Note) > 256 {
 		req.Note = req.Note[:256]
 	}
+	apiUser, _ := s.auth.GetSessionUser(r)
 	cert, err := s.ca.IssueCert(req.CN, req.Note, req.Days)
 	if err != nil {
 		s.log.Error("api issue cert failed", "cn", req.CN, "err", err)
+		s.db.InsertAuditLog("cert_issue", apiUser, s.clientIP(r), "api cn="+req.CN+" err="+err.Error(), false)
 		jsonError(w, "issue failed", http.StatusInternalServerError)
 		return
 	}
+	s.db.InsertAuditLog("cert_issue", apiUser, s.clientIP(r), "api cn="+req.CN+" serial="+cert.Serial, true)
 	jsonOK(w, cert)
 }
 
@@ -564,15 +603,33 @@ func (s *Server) apiRevokeCert(w http.ResponseWriter, r *http.Request) {
 	if req.Reason == "" {
 		req.Reason = "unspecified"
 	}
+	apiUser, _ := s.auth.GetSessionUser(r)
 	if err := s.ca.RevokeCert(req.Serial, req.Reason); err != nil {
 		s.log.Error("api revoke cert failed", "serial", req.Serial, "err", err)
+		s.db.InsertAuditLog("cert_revoke", apiUser, s.clientIP(r), "api serial="+req.Serial+" err="+err.Error(), false)
 		jsonError(w, "revoke failed", http.StatusInternalServerError)
 		return
 	}
+	s.db.InsertAuditLog("cert_revoke", apiUser, s.clientIP(r), "api serial="+req.Serial+" reason="+req.Reason, true)
 	jsonOK(w, map[string]string{"status": "revoked"})
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// clientIP 从请求中提取真实客户端 IP。
+// 只有在 Config.TrustedProxy=true 时才信任 X-Forwarded-For / X-Real-IP，
+// 否则直接使用 TCP 层的 RemoteAddr，防止攻击者伪造头绕过限速。
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustedProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.SplitN(xff, ",", 2)[0])
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return strings.TrimSpace(xri)
+		}
+	}
+	return r.RemoteAddr
+}
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

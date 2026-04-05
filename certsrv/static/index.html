@@ -180,7 +180,7 @@ function closeRevokeModal() {
 function getCsrfToken() {
   const m = document.cookie.split(';').map(c => c.trim())
     .find(c => c.startsWith('certsrv_session='));
-  return m ? m.split('=')[1].substring(0, 16) : '';
+  return m ? m.split('=')[1] : '';
 }
 
 async function confirmRevoke() {
@@ -214,7 +214,12 @@ function fmtDate(s) {
   return new Date(s).toLocaleDateString('zh-CN', {year:'numeric',month:'2-digit',day:'2-digit'});
 }
 function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 // 检查 URL 参数

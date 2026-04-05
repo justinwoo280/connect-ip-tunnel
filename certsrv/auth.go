@@ -308,6 +308,52 @@ func (a *authService) ClearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
+// ResetAdmin 重置指定管理员的密码并清除 2FA 绑定，使其回到首次登录状态。
+// 此操作只修改 admin 表，不触碰 certificates 表，证书状态完全不受影响。
+// newPassword 为空时自动生成一个随机强密码并返回。
+func ResetAdmin(dbPath, username, newPassword string) (finalPassword string, err error) {
+	db, err := openDB(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	// 确认账号存在
+	admin, err := db.GetAdmin(username)
+	if err != nil {
+		db.InsertAuditLog("admin_reset", username, "cli", "query failed: "+err.Error(), false)
+		return "", fmt.Errorf("query admin: %w", err)
+	}
+	if admin == nil {
+		db.InsertAuditLog("admin_reset", username, "cli", "user not found", false)
+		return "", fmt.Errorf("admin %q not found in database", username)
+	}
+
+	// 未提供密码时随机生成
+	if newPassword == "" {
+		newPassword = randHex(10) // 20 个十六进制字符，足够强
+	}
+	if len(newPassword) < 8 {
+		db.InsertAuditLog("admin_reset", username, "cli", "password too short", false)
+		return "", fmt.Errorf("password must be at least 8 characters")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+
+	if err := db.ResetAdminAuth(username, string(hash)); err != nil {
+		db.InsertAuditLog("admin_reset", username, "cli", "db update failed: "+err.Error(), false)
+		return "", fmt.Errorf("reset admin: %w", err)
+	}
+
+	// 成功：写审计记录（不记录密码本身）
+	db.InsertAuditLog("admin_reset", username, "cli", "password and 2FA reset via CLI", true)
+
+	return newPassword, nil
+}
+
 // ChangePassword 修改密码
 func (a *authService) ChangePassword(username, newPassword string) error {
 	if len(newPassword) < 8 {

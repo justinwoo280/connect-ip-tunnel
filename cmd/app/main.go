@@ -21,11 +21,19 @@ import (
 var Version = "dev"
 
 func main() {
-	// 支持两种调用方式：
-	//   connect-ip-tunnel --config foo.json        （无子命令）
-	//   connect-ip-tunnel server --config foo.json  （有子命令，兼容 Docker CMD）
+	// 支持以下调用方式：
+	//   connect-ip-tunnel --config foo.json              （无子命令）
+	//   connect-ip-tunnel server --config foo.json        （有子命令，兼容 Docker CMD）
 	//   connect-ip-tunnel client --config foo.json
+	//   connect-ip-tunnel reset-admin [flags]             （紧急重置管理员密码+2FA）
 	args := os.Args[1:]
+
+	// reset-admin 子命令：单独处理，不需要加载完整 config
+	if len(args) > 0 && args[0] == "reset-admin" {
+		runResetAdmin(args[1:])
+		return
+	}
+
 	if len(args) > 0 && (args[0] == "server" || args[0] == "client") {
 		args = args[1:] // 跳过子命令，只解析后面的 flags
 	}
@@ -54,6 +62,58 @@ func main() {
 	} else {
 		runServer(cfg.Server)
 	}
+}
+
+// runResetAdmin 处理 reset-admin 子命令。
+//
+// 用法：
+//
+//	connect-ip-tunnel reset-admin \
+//	    --db /etc/connect-ip-tunnel/certsrv.db \
+//	    [--username admin] \
+//	    [--password "NewPass@123"]   # 不指定则自动生成随机密码
+//
+// 该命令只修改 admin 表（pass_hash / totp_secret / totp_enabled / first_login），
+// certificates 表及 CA 密钥文件完全不受影响，证书/CRL 状态保持不变。
+// 重置后需重新登录并走 /setup 流程绑定新密码和 2FA。
+func runResetAdmin(args []string) {
+	fs := flag.NewFlagSet("reset-admin", flag.ExitOnError)
+	dbPath := fs.String("db", "/etc/connect-ip-tunnel/certsrv.db", "certsrv SQLite database path")
+	username := fs.String("username", "admin", "admin username to reset")
+	password := fs.String("password", "", "new password (leave empty to auto-generate)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Usage: connect-ip-tunnel reset-admin [flags]
+
+Reset the certsrv admin password and clear 2FA binding.
+The admin account will be set to "first login" state, requiring a new
+password and 2FA setup on next login.
+
+Certificate table and CA key files are NOT affected.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+
+	finalPassword, err := certsrv.ResetAdmin(*dbPath, *username, *password)
+	if err != nil {
+		log.Fatalf("reset-admin failed: %v", err)
+	}
+
+	fmt.Println("========================================")
+	fmt.Println(" certsrv admin reset successful")
+	fmt.Println("========================================")
+	fmt.Printf("  Username : %s\n", *username)
+	fmt.Printf("  Password : %s\n", finalPassword)
+	fmt.Println("  2FA      : cleared (will re-bind on next login)")
+	fmt.Println("----------------------------------------")
+	fmt.Println("  Next steps:")
+	fmt.Println("  1. Open certsrv in browser")
+	fmt.Printf("  2. Login with username=%s and the password above\n", *username)
+	fmt.Println("  3. You will be redirected to /setup to change password")
+	fmt.Println("  4. Then scan the new QR code to bind 2FA")
+	fmt.Println("========================================")
 }
 
 func runClient(cfg option.ClientConfig) {
@@ -145,12 +205,15 @@ func startCertSrv(cfg option.ServerConfig) (*certsrv.Server, error) {
 	}
 
 	cs, err := certsrv.New(certsrv.Config{
-		Listen:     c.Listen,
-		DBPath:     c.DBPath,
-		CACertFile: c.CACertFile,
-		CAKeyFile:  c.CAKeyFile,
-		TLSCert:    c.TLSCert,
-		TLSKey:     c.TLSKey,
+		Listen:          c.Listen,
+		DBPath:          c.DBPath,
+		CACertFile:      c.CACertFile,
+		CAKeyFile:       c.CAKeyFile,
+		TLSCert:         c.TLSCert,
+		TLSKey:          c.TLSKey,
+		AuditLogDir:     c.AuditLogDir,
+		AuditRetainDays: c.AuditRetainDays,
+		TrustedProxy:    c.TrustedProxy,
 	}, slog.Default())
 	if err != nil {
 		return nil, err

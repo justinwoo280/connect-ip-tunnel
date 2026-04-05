@@ -94,6 +94,14 @@ type CertSrvConfig struct {
 	CAKeyFile  string `json:"ca_key_file"`  // CA 私钥路径
 	TLSCert    string `json:"tls_cert"`     // certsrv HTTPS 证书（留空复用 tls.cert_file）
 	TLSKey     string `json:"tls_key"`      // certsrv HTTPS 私钥（留空复用 tls.key_file）
+
+	// 审计日志轮转配置
+	AuditLogDir     string `json:"audit_log_dir"`      // JSONL 导出目录，留空则只删不导出
+	AuditRetainDays int    `json:"audit_retain_days"`  // DB 内保留天数，默认 30
+
+	// TrustedProxy 为 true 时才信任 X-Forwarded-For / X-Real-IP 取客户端真实 IP。
+	// 仅在 certsrv 前有可信反向代理（如 nginx）时开启，否则攻击者可伪造请求头绕过登录限速。
+	TrustedProxy bool `json:"trusted_proxy"`
 }
 
 type TUNConfig struct {

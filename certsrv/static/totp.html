@@ -79,7 +79,7 @@
   const m = document.cookie.split(';').map(c => c.trim())
     .find(c => c.startsWith('certsrv_session='));
   if (!m) return;
-  const csrf = m.split('=')[1].substring(0, 16);
+  const csrf = m.split('=')[1];
   document.querySelectorAll('form[method="POST"],form[method="post"]').forEach(f => {
     if (!f.querySelector('[name="_csrf"]')) {
       const i = document.createElement('input');

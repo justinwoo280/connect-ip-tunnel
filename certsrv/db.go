@@ -2,7 +2,10 @@ package certsrv
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -80,6 +83,19 @@ func migrate(conn *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_certs_serial  ON certificates(serial);
 	CREATE INDEX IF NOT EXISTS idx_certs_revoked ON certificates(revoked);
+
+	CREATE TABLE IF NOT EXISTS audit_log (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts         DATETIME NOT NULL,
+		action     TEXT NOT NULL,
+		username   TEXT NOT NULL DEFAULT '',
+		ip         TEXT NOT NULL DEFAULT '',
+		detail     TEXT NOT NULL DEFAULT '',
+		ok         INTEGER NOT NULL DEFAULT 1
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_audit_ts     ON audit_log(ts);
+	CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
 	`)
 	return err
 }
@@ -122,6 +138,27 @@ func (db *DB) UpdateAdminTOTP(username, secret string) error {
 		`UPDATE admin SET totp_secret = ?, totp_enabled = 1, first_login = 0
 		 WHERE username = ?`, secret, username)
 	return err
+}
+
+// ResetAdminAuth 重置管理员密码并清除 2FA，将账号恢复到"首次登录"状态。
+// 登录后会强制走 /setup 流程重新设置密码和绑定 2FA。
+// 证书表完全不受影响。
+func (db *DB) ResetAdminAuth(username, passHash string) error {
+	res, err := db.conn.Exec(
+		`UPDATE admin
+		 SET pass_hash    = ?,
+		     totp_secret  = '',
+		     totp_enabled = 0,
+		     first_login  = 1
+		 WHERE username = ?`, passHash, username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("admin %q not found", username)
+	}
+	return nil
 }
 
 // ── Certificates ─────────────────────────────────────────────────────────────
@@ -240,6 +277,159 @@ func scanCert(s scanner) (*Certificate, error) {
 		c.RevokedAt = &t
 	}
 	return &c, nil
+}
+
+// ── Audit Log ─────────────────────────────────────────────────────────────────
+
+// AuditEntry 代表一条审计记录
+type AuditEntry struct {
+	ID       int64
+	TS       time.Time
+	Action   string
+	Username string
+	IP       string
+	Detail   string
+	OK       bool
+}
+
+// InsertAuditLog 写入一条审计记录（fire-and-forget，失败只打印不影响主流程）
+func (db *DB) InsertAuditLog(action, username, ip, detail string, ok bool) {
+	okInt := 1
+	if !ok {
+		okInt = 0
+	}
+	db.conn.Exec(
+		`INSERT INTO audit_log (ts, action, username, ip, detail, ok)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), action, username, ip, detail, okInt,
+	)
+}
+
+// ListAuditLog 返回最近 limit 条审计记录（按时间倒序）
+func (db *DB) ListAuditLog(limit int) ([]*AuditEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, ts, action, username, ip, detail, ok
+		 FROM audit_log ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		var ts string
+		var okInt int
+		if err := rows.Scan(&e.ID, &ts, &e.Action, &e.Username, &e.IP, &e.Detail, &okInt); err != nil {
+			return nil, err
+		}
+		e.TS, _ = time.Parse(time.RFC3339, ts)
+		e.OK = okInt == 1
+		entries = append(entries, &e)
+	}
+	return entries, rows.Err()
+}
+
+// RotateAuditLog 将超过 retainDays 天的审计记录导出到 JSONL 文件后从 DB 删除。
+// 导出文件路径：<dir>/audit-<YYYY-MM-DD>.jsonl（按执行日期命名，追加写入）。
+// retainDays <= 0 时使用默认值 30。
+// 返回导出条数和删除条数。
+func (db *DB) RotateAuditLog(dir string, retainDays int) (exported, deleted int, err error) {
+	if retainDays <= 0 {
+		retainDays = 30
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(retainDays) * 24 * time.Hour).Format(time.RFC3339)
+
+	// 查出需要清理的记录
+	rows, err := db.conn.Query(
+		`SELECT id, ts, action, username, ip, detail, ok
+		 FROM audit_log WHERE ts < ? ORDER BY id ASC`, cutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query expired audit: %w", err)
+	}
+	defer rows.Close()
+
+	var toDelete []int64
+	var buf []byte
+
+	for rows.Next() {
+		var e AuditEntry
+		var ts string
+		var okInt int
+		if err := rows.Scan(&e.ID, &ts, &e.Action, &e.Username, &e.IP, &e.Detail, &okInt); err != nil {
+			return 0, 0, fmt.Errorf("scan audit row: %w", err)
+		}
+		e.TS, _ = time.Parse(time.RFC3339, ts)
+		e.OK = okInt == 1
+		toDelete = append(toDelete, e.ID)
+
+		// 序列化为 JSON 行
+		line, err := json.Marshal(map[string]any{
+			"id":       e.ID,
+			"ts":       e.TS.Format(time.RFC3339),
+			"action":   e.Action,
+			"username": e.Username,
+			"ip":       e.IP,
+			"detail":   e.Detail,
+			"ok":       e.OK,
+		})
+		if err != nil {
+			return 0, 0, fmt.Errorf("marshal audit entry: %w", err)
+		}
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("iterate audit rows: %w", err)
+	}
+	if len(toDelete) == 0 {
+		return 0, 0, nil // 没有过期记录
+	}
+
+	// 追加写入 JSONL 文件（dir 为空则跳过导出）
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return 0, 0, fmt.Errorf("create audit log dir: %w", err)
+		}
+		filename := fmt.Sprintf("%s/audit-%s.jsonl", dir, time.Now().UTC().Format("2006-01-02"))
+		f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+		if err != nil {
+			return 0, 0, fmt.Errorf("open audit export file: %w", err)
+		}
+		if _, err := f.Write(buf); err != nil {
+			f.Close()
+			return 0, 0, fmt.Errorf("write audit export: %w", err)
+		}
+		f.Close()
+		exported = len(toDelete)
+	}
+
+	// 批量删除（SQLite 单写串行，分批避免长锁）
+	const batchSize = 200
+	for i := 0; i < len(toDelete); i += batchSize {
+		end := i + batchSize
+		if end > len(toDelete) {
+			end = len(toDelete)
+		}
+		batch := toDelete[i:end]
+		// 构造 IN (?,?,?...) 占位符
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for j, id := range batch {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+		query := "DELETE FROM audit_log WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+		if _, err := db.conn.Exec(query, args...); err != nil {
+			return exported, deleted, fmt.Errorf("delete audit batch: %w", err)
+		}
+		deleted += len(batch)
+	}
+
+	return exported, deleted, nil
 }
 
 func (db *DB) Close() error {
