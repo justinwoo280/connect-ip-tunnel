@@ -1,0 +1,131 @@
+026/04/05 16:38:54 INFO CRL refreshed url=https://127.0.0.1:8443/crl.pem revoked_count=0 next_update=2026-04-06T16:38:24Z
+2026/04/05 16:39:30 http: TLS handshake error from 3.129.187.38:59886: client sent an HTTP request to an HTTPS server
+2026/04/05 16:39:32 http: TLS handshake error from 20.195.24.178:24960: remote error: tls: unknown certificate
+2026/04/05 16:39:35 http: TLS handshake error from 20.195.9.169:28987: remote error: tls: unknown certificate
+2026/04/05 16:39:42 http: TLS handshake error from 3.129.187.38:59912: unexpected EOF
+2026/04/05 16:41:59 http: TLS handshake error from 3.129.187.38:39730: tls: first record does not look like a TLS handshake
+2026/04/05 16:47:39 [server] assigned ipv4: 10.233.0.1/32 to session 9a9385ac99c7004b
+2026/04/05 16:47:39 [server] assigned ipv6: fd00::1/128 to session 9a9385ac99c7004b
+2026/04/05 16:47:39 [dispatcher] registered session 9a9385ac99c7004b (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:39 [server] session 9a9385ac99c7004b started from 223.104.128.74:20271 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:39 handling stream failed: EOF
+2026/04/05 16:47:39 writing to stream failed: use of closed network connection
+2026/04/05 16:47:39 [server] session 9a9385ac99c7004b closed
+2026/04/05 16:47:39 [dispatcher] unregistered session 9a9385ac99c7004b
+2026/04/05 16:47:41 [server] assigned ipv4: 10.233.0.1/32 to session 431e83e7059d1289
+2026/04/05 16:47:41 [server] assigned ipv6: fd00::1/128 to session 431e83e7059d1289
+2026/04/05 16:47:41 [dispatcher] registered session 431e83e7059d1289 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:41 [server] session 431e83e7059d1289 started from 223.104.128.74:20272 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:41 handling stream failed: EOF
+2026/04/05 16:47:41 writing to stream failed: use of closed network connection
+2026/04/05 16:47:41 [server] session 431e83e7059d1289 closed
+2026/04/05 16:47:41 [dispatcher] unregistered session 431e83e7059d1289
+2026/04/05 16:47:44 [server] assigned ipv4: 10.233.0.1/32 to session 39d433a1b9da4c6c
+2026/04/05 16:47:44 [server] assigned ipv6: fd00::1/128 to session 39d433a1b9da4c6c
+2026/04/05 16:47:44 [dispatcher] registered session 39d433a1b9da4c6c (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:44 [server] session 39d433a1b9da4c6c started from 223.104.128.74:20273 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:44 handling stream failed: EOF
+2026/04/05 16:47:44 writing to stream failed: use of closed network connection
+2026/04/05 16:47:44 [server] session 39d433a1b9da4c6c closed
+2026/04/05 16:47:44 [dispatcher] unregistered session 39d433a1b9da4c6c
+2026/04/05 16:47:49 [server] assigned ipv4: 10.233.0.1/32 to session 405614249e8c8562
+2026/04/05 16:47:49 [server] assigned ipv6: fd00::1/128 to session 405614249e8c8562
+2026/04/05 16:47:49 [dispatcher] registered session 405614249e8c8562 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:49 [server] session 405614249e8c8562 started from 223.104.128.74:20274 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:49 handling stream failed: EOF
+2026/04/05 16:47:49 writing to stream failed: use of closed network connection
+2026/04/05 16:47:49 [server] session 405614249e8c8562 closed
+2026/04/05 16:47:49 [dispatcher] unregistered session 405614249e8c8562
+2026/04/05 16:47:59 [server] assigned ipv4: 10.233.0.1/32 to session 4b35f2c77ac4d412
+2026/04/05 16:47:59 [server] assigned ipv6: fd00::1/128 to session 4b35f2c77ac4d412
+2026/04/05 16:47:59 [dispatcher] registered session 4b35f2c77ac4d412 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:59 [server] session 4b35f2c77ac4d412 started from 223.104.128.74:20275 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:47:59 handling stream failed: EOF
+2026/04/05 16:47:59 writing to stream failed: use of closed network connection
+2026/04/05 16:47:59 [server] session 4b35f2c77ac4d412 closed
+2026/04/05 16:47:59 [dispatcher] unregistered session 4b35f2c77ac4d412
+2026/04/05 16:48:19 [server] assigned ipv4: 10.233.0.1/32 to session 5dfec2d49ee6a599
+2026/04/05 16:48:19 [server] assigned ipv6: fd00::1/128 to session 5dfec2d49ee6a599
+2026/04/05 16:48:19 [dispatcher] registered session 5dfec2d49ee6a599 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:48:19 [server] session 5dfec2d49ee6a599 started from 223.104.128.74:26195 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:48:20 handling stream failed: EOF
+2026/04/05 16:48:20 writing to stream failed: use of closed network connection
+2026/04/05 16:48:20 [server] session 5dfec2d49ee6a599 closed
+2026/04/05 16:48:20 [dispatcher] unregistered session 5dfec2d49ee6a599
+2026/04/05 16:48:54 INFO CRL refreshed url=https://127.0.0.1:8443/crl.pem revoked_count=0 next_update=2026-04-06T16:38:24Z
+2026/04/05 16:49:20 [server] assigned ipv4: 10.233.0.1/32 to session b07f7df941d155f2
+2026/04/05 16:49:20 [server] assigned ipv6: fd00::1/128 to session b07f7df941d155f2
+2026/04/05 16:49:20 [dispatcher] registered session b07f7df941d155f2 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:20 [server] session b07f7df941d155f2 started from 223.104.128.74:20741 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:20 handling stream failed: EOF
+2026/04/05 16:49:20 writing to stream failed: use of closed network connection
+2026/04/05 16:49:20 [server] session b07f7df941d155f2 closed
+2026/04/05 16:49:20 [dispatcher] unregistered session b07f7df941d155f2
+2026/04/05 16:49:22 [server] assigned ipv4: 10.233.0.1/32 to session 4fb7c1e0d5bd240e
+2026/04/05 16:49:22 [server] assigned ipv6: fd00::1/128 to session 4fb7c1e0d5bd240e
+2026/04/05 16:49:22 [dispatcher] registered session 4fb7c1e0d5bd240e (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:22 [server] session 4fb7c1e0d5bd240e started from 223.104.128.74:20742 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:22 handling stream failed: EOF
+2026/04/05 16:49:22 writing to stream failed: use of closed network connection
+2026/04/05 16:49:22 [server] session 4fb7c1e0d5bd240e closed
+2026/04/05 16:49:22 [dispatcher] unregistered session 4fb7c1e0d5bd240e
+2026/04/05 16:49:25 [server] assigned ipv4: 10.233.0.1/32 to session 758d13da8a7ec696
+2026/04/05 16:49:25 [server] assigned ipv6: fd00::1/128 to session 758d13da8a7ec696
+2026/04/05 16:49:25 [dispatcher] registered session 758d13da8a7ec696 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:25 [server] session 758d13da8a7ec696 started from 223.104.128.74:20743 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:25 handling stream failed: EOF
+2026/04/05 16:49:25 writing to stream failed: use of closed network connection
+2026/04/05 16:49:25 [server] session 758d13da8a7ec696 closed
+2026/04/05 16:49:25 [dispatcher] unregistered session 758d13da8a7ec696
+2026/04/05 16:49:31 [server] assigned ipv4: 10.233.0.1/32 to session 9fe1341c4a7ad361
+2026/04/05 16:49:31 [server] assigned ipv6: fd00::1/128 to session 9fe1341c4a7ad361
+2026/04/05 16:49:31 [dispatcher] registered session 9fe1341c4a7ad361 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:31 [server] session 9fe1341c4a7ad361 started from 223.104.128.74:26196 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:32 handling stream failed: EOF
+2026/04/05 16:49:32 writing to stream failed: use of closed network connection
+2026/04/05 16:49:32 [server] session 9fe1341c4a7ad361 closed
+2026/04/05 16:49:32 [dispatcher] unregistered session 9fe1341c4a7ad361
+2026/04/05 16:49:44 [server] assigned ipv4: 10.233.0.1/32 to session e8b5d0b662435667
+2026/04/05 16:49:44 [server] assigned ipv6: fd00::1/128 to session e8b5d0b662435667
+2026/04/05 16:49:44 [dispatcher] registered session e8b5d0b662435667 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:44 [server] session e8b5d0b662435667 started from 223.104.128.74:26662 (ipv4=10.233.0.1/32 ipv6=fd00::1/128)
+2026/04/05 16:49:44 handling stream failed: EOF
+2026/04/05 16:49:44 writing to stream failed: use of closed network connection
+2026/04/05 16:49:44 [server] session e8b5d0b662435667 closed
+2026/04/05 16:49:44 [dispatcher] unregistered session e8b5d0b662435667
+
+
+[00:56:45] 2026/04/06 00:56:45 connect-ip-tunnel dev starting in client mode
+[00:56:45] 2026/04/06 00:56:45 [engine] starting with tun=tun0 mtu=1400
+[00:56:45] 2026/04/06 00:56:45 Using existing driver 0.14
+[00:56:45] 2026/04/06 00:56:45 Creating adapter
+[00:56:45] 2026/04/06 00:56:45 [engine] tun created: if=tun0 mtu=1400
+[00:56:46] 2026/04/06 00:56:46 Removed orphaned adapter "ewp-tun"
+[00:56:46] 2026/04/06 00:56:46 [engine] started: tun=tun0 server=168.138.4.186:443
+[00:56:46] 2026/04/06 00:56:46 client started, press Ctrl+C to exit
+[00:56:46] 2026/04/06 00:56:46 [engine] admin server listening on 127.0.0.1:60130
+[00:56:46] [GUI] Admin 接口就绪，端口: 60130，开始统计轮询
+[00:56:46] 2026/04/06 00:56:46 [engine] connect-ip session established to 168.138.4.186:443
+[00:56:46] 2026/04/06 00:56:46 [engine] waiting for ADDRESS_ASSIGN from server (timeout=30s)
+[00:56:46] 2026/04/06 00:56:46 handling stream failed: H3_REQUEST_CANCELLED (local)
+[00:56:46] 2026/04/06 00:56:46 [engine] session ended: engine: address assign: wait for address assign: use of closed network connection
+[00:56:46] 2026/04/06 00:56:46 [engine] reconnecting in 1.169533896s
+[00:56:46] 2026/04/06 00:56:46 writing to stream failed: use of closed network connection
+[00:56:48] 2026/04/06 00:56:48 [engine] connect-ip session established to 168.138.4.186:443
+[00:56:48] 2026/04/06 00:56:48 [engine] waiting for ADDRESS_ASSIGN from server (timeout=30s)
+[00:56:48] 2026/04/06 00:56:48 handling stream failed: H3_REQUEST_CANCELLED (local)
+[00:56:48] 2026/04/06 00:56:48 writing to stream failed: use of closed network connection
+[00:56:48] 2026/04/06 00:56:48 [engine] session ended: engine: address assign: wait for address assign: use of closed network connection
+[00:56:48] 2026/04/06 00:56:48 [engine] reconnecting in 2.633970031s
+[00:56:52] 2026/04/06 00:56:52 [engine] connect-ip session established to 168.138.4.186:443
+[00:56:52] 2026/04/06 00:56:52 [engine] waiting for ADDRESS_ASSIGN from server (timeout=30s)
+[00:56:52] 2026/04/06 00:56:52 handling stream failed: H3_REQUEST_CANCELLED (local)
+[00:56:52] 2026/04/06 00:56:52 [engine] session ended: engine: address assign: wait for address assign: use of closed network connection
+[00:56:52] 2026/04/06 00:56:52 [engine] reconnecting in 4.114086183s
+[00:56:52] 2026/04/06 00:56:52 writing to stream failed: use of closed network connection
+[00:56:57] 2026/04/06 00:56:57 [engine] connect-ip session established to 168.138.4.186:443
+[00:56:57] 2026/04/06 00:56:57 [engine] waiting for ADDRESS_ASSIGN from server (timeout=30s)
+[00:56:57] 2026/04/06 00:56:57 handling stream failed: H3_REQUEST_CANCELLED (local)
+[00:56:57] 2026/04/06 00:56:57 writing to stream failed: use of closed network connection
+[00:56:57] 2026/04/06 00:56:57 [engine] session ended: engine: address assign: wait for address assign: use of closed network connection
+[00:56:57] 2026/04/06 00:56:57 [engine] reconnecting in 9.039243634s

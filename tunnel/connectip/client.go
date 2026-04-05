@@ -58,16 +58,11 @@ func (c *Client) Open(ctx context.Context, target h3transport.Target, opts Optio
 	if err != nil {
 		return nil, fmt.Errorf("connectip: dial: %w", err)
 	}
-	if resp != nil {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			return nil, fmt.Errorf("connectip: server rejected connection (status %d) — check mTLS certificate", resp.StatusCode)
-		}
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
+	// 注意：Connect-IP 协议中 resp.Body 就是长连接的 HTTP/3 stream 本身，
+	// 不能 Close()，否则会立即关闭 stream 导致 ADDRESS_ASSIGN capsule 无法收发。
+	// stream 的生命周期由 connectipgo.Conn 内部管理。
+	if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return nil, fmt.Errorf("connectip: server rejected connection (status %d) — check mTLS certificate", resp.StatusCode)
 	}
 
 	return newSession(conn, c.dev), nil

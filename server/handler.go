@@ -81,8 +81,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if len(prefixes) > 0 {
 		if err := conn.AssignAddresses(r.Context(), prefixes); err != nil {
-			log.Printf("[server] warning: assign addresses failed: %v", err)
-			// 不中断连接，继续处理
+			log.Printf("[server] assign addresses failed: %v", err)
+			s.ipPool.ReleaseIP(sessionID)
+			_ = conn.Close()
+			return
 		}
 	}
 
