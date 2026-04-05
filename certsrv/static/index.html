@@ -26,6 +26,7 @@
         + 签发证书
       </a>
       <form method="POST" action="/logout" class="inline">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
         <button type="submit"
           class="px-3 py-2 text-gray-400 hover:text-white text-sm transition">
           退出
@@ -113,6 +114,8 @@
 </div>
 
 <script>
+// 服务端注入的 CSRF token，供 fetch 请求使用（不依赖 JS 读 HttpOnly cookie）
+const CSRF_TOKEN = '{{.CSRFToken}}';
 let revokeSerial = '';
 
 async function loadCerts() {
@@ -177,19 +180,13 @@ function openRevokeModal(serial) {
 function closeRevokeModal() {
   document.getElementById('revoke-modal').classList.add('hidden');
 }
-function getCsrfToken() {
-  const m = document.cookie.split(';').map(c => c.trim())
-    .find(c => c.startsWith('certsrv_session='));
-  return m ? m.split('=')[1] : '';
-}
-
 async function confirmRevoke() {
   const reason = document.getElementById('revoke-reason').value || 'unspecified';
   const res = await fetch('/api/v1/certs/revoke', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-CSRF-Token': getCsrfToken(),
+      'X-CSRF-Token': CSRF_TOKEN,
     },
     body: JSON.stringify({serial: revokeSerial, reason})
   });

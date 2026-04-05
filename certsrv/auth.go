@@ -283,6 +283,17 @@ func (a *authService) GetSessionUser(r *http.Request) (string, bool) {
 	return sess.username, true
 }
 
+// GetCSRFToken 从请求的 session 中派生 CSRF token。
+// CSRF token = session token 本身（只有同源页面才能读到服务端注入到 HTML 里的值）。
+// 调用方应将其注入到 HTML 表单隐藏字段，而不是让 JS 读 HttpOnly cookie。
+func (a *authService) GetCSRFToken(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
 // SetSessionCookie 在响应中写入 session cookie
 func (a *authService) SetSessionCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{

@@ -54,7 +54,8 @@
     </div>
 
     <form method="POST" action="/setup/totp" class="space-y-5">
-      <!-- _csrf 由 JS 自动注入，secret 不再由客户端提交（服务端 session 保存）-->
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <!-- secret 不再由客户端提交（服务端 session 保存）-->
       <div>
         <label class="block text-sm font-medium text-gray-300 mb-1.5">输入验证码确认绑定</label>
         <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
@@ -73,21 +74,5 @@
     </form>
   </div>
 </div>
-<script>
-// 自动为所有 POST form 注入 CSRF token（取 session cookie 前 16 字节）
-(function() {
-  const m = document.cookie.split(';').map(c => c.trim())
-    .find(c => c.startsWith('certsrv_session='));
-  if (!m) return;
-  const csrf = m.split('=')[1];
-  document.querySelectorAll('form[method="POST"],form[method="post"]').forEach(f => {
-    if (!f.querySelector('[name="_csrf"]')) {
-      const i = document.createElement('input');
-      i.type = 'hidden'; i.name = '_csrf'; i.value = csrf;
-      f.appendChild(i);
-    }
-  });
-})();
-</script>
 </body>
 </html>

@@ -273,7 +273,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupPage(w http.ResponseWriter, r *http.Request) {
-	serveHTML(w, "setup.html")
+	serveHTMLWithData(w, "setup.html", map[string]any{
+		"CSRFToken": s.auth.GetCSRFToken(r),
+	})
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -322,11 +324,11 @@ func (s *Server) handleTOTPPage(w http.ResponseWriter, r *http.Request) {
 		s.auth.sessions.setTOTPSecret(cookie.Value, secret)
 	}
 
-	// 只将 QR 码传给前端，secret 不再暴露
-	data := map[string]string{
-		"qrBase64": qrBase64,
-	}
-	serveHTMLWithData(w, "totp.html", data)
+	// 只将 QR 码和 CSRF token 传给前端，secret 不再暴露
+	serveHTMLWithData(w, "totp.html", map[string]any{
+		"qrBase64":  qrBase64,
+		"CSRFToken": s.auth.GetCSRFToken(r),
+	})
 }
 
 func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
@@ -362,11 +364,15 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCertList(w http.ResponseWriter, r *http.Request) {
-	serveHTML(w, "index.html")
+	serveHTMLWithData(w, "index.html", map[string]any{
+		"CSRFToken": s.auth.GetCSRFToken(r),
+	})
 }
 
 func (s *Server) handleIssuePage(w http.ResponseWriter, r *http.Request) {
-	serveHTML(w, "issue.html")
+	serveHTMLWithData(w, "issue.html", map[string]any{
+		"CSRFToken": s.auth.GetCSRFToken(r),
+	})
 }
 
 // validateCN 校验证书 CN 字段：仅允许字母、数字、连字符、下划线、点，长度 1-64

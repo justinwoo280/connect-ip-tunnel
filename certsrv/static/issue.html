@@ -37,6 +37,7 @@
 
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-6">
     <form method="POST" action="/certs/issue" class="space-y-6">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <!-- CN -->
       <div>
         <label class="block text-sm font-medium text-gray-300 mb-1.5">
@@ -125,21 +126,6 @@
 </main>
 
 <script>
-// CSRF token 注入
-(function() {
-  const m = document.cookie.split(';').map(c => c.trim())
-    .find(c => c.startsWith('certsrv_session='));
-  if (!m) return;
-  const csrf = m.split('=')[1];
-  document.querySelectorAll('form[method="POST"],form[method="post"]').forEach(f => {
-    if (!f.querySelector('[name="_csrf"]')) {
-      const i = document.createElement('input');
-      i.type = 'hidden'; i.name = '_csrf'; i.value = csrf;
-      f.appendChild(i);
-    }
-  });
-})();
-
 function setDays(d) {
   document.getElementById('days-input').value = d;
   updateExpiry();
