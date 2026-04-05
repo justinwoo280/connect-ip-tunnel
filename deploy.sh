@@ -36,6 +36,7 @@ NAT_IFACE=""
 TUN_NAME="tun0"
 TUN_MTU="1400"
 SERVER_CN="connect-ip-server"         # 证书 CN / SAN
+SERVER_HOSTNAME=""                     # 客户端连接用的主机名（uri_template / authority）
 CERTSRV_PORT="8443"                   # certsrv 监听端口（留空则不启动）
 CERTSRV_ENABLED="true"
 
@@ -227,7 +228,7 @@ gen_server_config() {
   "mode": "server",
   "server": {
     "listen": ":${SERVER_PORT}",
-    "uri_template": "/.well-known/masque/ip",
+    "uri_template": "https://${SERVER_HOSTNAME}/.well-known/masque/ip",
     "admin_listen": ":${ADMIN_PORT}",
     "tun": {
       "name": "${TUN_NAME}",
@@ -288,6 +289,8 @@ collect_config() {
 
     echo ""
     SERVER_CN=$(prompt "证书 CN（域名或 IP，用于客户端验证）" "$(hostname -f 2>/dev/null || echo connect-ip-server)")
+    SERVER_HOSTNAME=$(prompt "客户端连接主机名（uri_template/authority，留空同证书CN）" "$SERVER_CN")
+    [[ -z "$SERVER_HOSTNAME" ]] && SERVER_HOSTNAME="$SERVER_CN"
 
     echo ""
     if prompt_yn "启用 certsrv 证书管理面板？（推荐）" "y"; then
@@ -577,8 +580,8 @@ print_summary() {
     echo -e "  │     },"
     echo -e "  │     \"connect_ip\": {"
     echo -e "  │       \"addr\":             \"${public_ip}:${SERVER_PORT}\","
-    echo -e "  │       \"uri\":              \"/.well-known/masque/ip\","
-    echo -e "  │       \"authority\":        \"${SERVER_CN}\","
+    echo -e "  │       \"uri\":              \"https://${SERVER_HOSTNAME}/.well-known/masque/ip\","
+    echo -e "  │       \"authority\":        \"${SERVER_HOSTNAME}\","
     echo -e "  │       \"enable_reconnect\": true"
     echo -e "  │     }"
     echo -e "  │   }"

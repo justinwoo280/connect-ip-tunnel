@@ -52,10 +52,15 @@ func New(cfg option.ServerConfig) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+
+	// connect-ip-go 的 ParseRequest 要求完整 URI Template（含 scheme + host），
+	// 且 host 必须与客户端请求的 :authority（即客户端配置的 connect_ip.authority）完全一致。
+	// 配置示例：uri_template = "https://vpn.example.com/.well-known/masque/ip"
 	tmpl, err := uritemplate.New(cfg.URITemplate)
 	if err != nil {
-		return nil, fmt.Errorf("server: invalid uri template: %w", err)
+		return nil, fmt.Errorf("server: invalid uri template %q: %w", cfg.URITemplate, err)
 	}
+	log.Printf("[server] uri template: %s", cfg.URITemplate)
 	return &Server{
 		cfg:         cfg,
 		sessions:    make(map[string]*Session),

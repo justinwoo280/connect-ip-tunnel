@@ -101,7 +101,7 @@ func (s *ServerConfig) ApplyDefaults() {
 		s.Listen = ":443"
 	}
 	if s.URITemplate == "" {
-		s.URITemplate = "/.well-known/masque/ip"
+		s.URITemplate = "https://localhost/.well-known/masque/ip"
 	}
 	if s.TUN.MTU <= 0 {
 		s.TUN.MTU = 1400

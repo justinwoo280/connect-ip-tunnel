@@ -10,7 +10,7 @@ import (
 func DefaultConfig() ClientConfig {
 	cfg := ClientConfig{
 		ConnectIP: ConnectIPConfig{
-			URI:                  "/.well-known/masque/ip",
+			URI:                  "https://localhost/.well-known/masque/ip",
 			WaitForAddressAssign: true,
 			EnableReconnect:      true,
 		},

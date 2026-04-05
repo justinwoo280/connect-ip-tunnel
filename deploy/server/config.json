@@ -2,7 +2,7 @@
   "mode": "server",
   "server": {
     "listen": ":443",
-    "uri_template": "/.well-known/masque/ip",
+    "uri_template": "https://server.connect-ip.local/.well-known/masque/ip",
     "admin_listen": ":9090",
     "tun": {
       "name": "tun0",
