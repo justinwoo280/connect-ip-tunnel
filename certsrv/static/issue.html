@@ -29,9 +29,9 @@
 </nav>
 
 <main class="max-w-2xl mx-auto px-6 py-8">
-  {{if .}}
+  {{if .Error}}
   <div class="mb-4 p-3 bg-red-900/40 border border-red-700 rounded-lg text-red-300 text-sm">
-    签发失败：{{.}}
+    签发失败：{{.Error}}
   </div>
   {{end}}
 

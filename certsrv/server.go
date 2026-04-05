@@ -273,8 +273,16 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupPage(w http.ResponseWriter, r *http.Request) {
+	errMsg := ""
+	switch r.URL.Query().Get("error") {
+	case "password_mismatch":
+		errMsg = "两次输入的密码不一致，请重试"
+	case "change_failed":
+		errMsg = "密码修改失败，请确保密码至少 8 位"
+	}
 	serveHTMLWithData(w, "setup.html", map[string]any{
 		"CSRFToken": s.auth.GetCSRFToken(r),
+		"Error":     errMsg,
 	})
 }
 
@@ -325,9 +333,11 @@ func (s *Server) handleTOTPPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 只将 QR 码和 CSRF token 传给前端，secret 不再暴露
+	showError := r.URL.Query().Get("error") != ""
 	serveHTMLWithData(w, "totp.html", map[string]any{
 		"qrBase64":  qrBase64,
 		"CSRFToken": s.auth.GetCSRFToken(r),
+		"Error":     showError,
 	})
 }
 
@@ -370,8 +380,16 @@ func (s *Server) handleCertList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIssuePage(w http.ResponseWriter, r *http.Request) {
+	errMsg := ""
+	switch r.URL.Query().Get("error") {
+	case "invalid_cn":
+		errMsg = "CN 格式不合法，仅允许字母、数字、连字符、下划线、点，长度 1-64"
+	case "issue_failed":
+		errMsg = "证书签发失败，请检查服务器日志"
+	}
 	serveHTMLWithData(w, "issue.html", map[string]any{
 		"CSRFToken": s.auth.GetCSRFToken(r),
+		"Error":     errMsg,
 	})
 }
 
