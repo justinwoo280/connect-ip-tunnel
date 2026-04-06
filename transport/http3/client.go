@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	bypass "connect-ip-tunnel/platform/bypass"
@@ -55,11 +56,16 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 		var dialErr error
 
 		if f.bypass != nil {
-			pc, err := f.bypass.ListenPacket(ctx, "udp", "")
+			// 根据目标地址类型选择 udp4 或 udp6，确保创建的是单栈 socket。
+			// Windows 上 "udp" 会产生双栈 IPv6 socket（本地地址为 [::]），
+			// 此时 IP_UNICAST_IF（IPPROTO_IP）对该 socket 无效，bypass 绑定不生效；
+			// 显式使用 udp4/udp6 可保证 setsockopt 作用于正确协议族的 socket。
+			udpNetwork := udpNetworkForAddr(target.Addr)
+			pc, err := f.bypass.ListenPacket(ctx, udpNetwork, "")
 			if err != nil {
 				return nil, fmt.Errorf("http3: bypass listen packet: %w", err)
 			}
-			udpAddr, err := net.ResolveUDPAddr("udp", target.Addr)
+			udpAddr, err := net.ResolveUDPAddr(udpNetwork, target.Addr)
 			if err != nil {
 				_ = pc.Close()
 				return nil, fmt.Errorf("http3: resolve target addr %q: %w", target.Addr, err)
@@ -94,6 +100,24 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 
 		return t.NewClientConn(quicConn), nil
 	}
+}
+
+// udpNetworkForAddr 根据目标地址判断应使用 "udp4" 还是 "udp6"。
+// 若解析失败或无法判断，保守返回 "udp4"（绝大多数服务端为 IPv4）。
+func udpNetworkForAddr(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 没有端口，直接当 host 解析
+		host = addr
+	}
+	// 去掉 IPv6 括号 [::1] → ::1
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip != nil && ip.To4() == nil {
+		// 纯 IPv6 地址
+		return "udp6"
+	}
+	return "udp4"
 }
 
 func (f *Factory) Close() error {

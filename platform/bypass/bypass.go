@@ -55,6 +55,11 @@ func newPlatformDialer(cfg Config, control func(*net.Interface) func(network, ad
 	}, nil
 }
 
+// NetDialer 暴露内部的 *net.Dialer，供需要标准 Dialer 的组件使用（如 ECHManager DoH 客户端）。
+func (d *stdDialer) NetDialer() *net.Dialer {
+	return d.dialer
+}
+
 func (d *stdDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	return d.dialer.DialContext(ctx, network, addr)
 }
