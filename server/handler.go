@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -164,16 +167,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			n, err := session.ReadPacket(buf)
 			if err != nil {
-				errCh <- fmt.Errorf("uplink read: %w", err)
-				return
+				// connect-ip-go 对不合法源/目标地址、畸形包等返回普通错误（可恢复）；
+				// 只有 CloseError（对应 net.ErrClosed）和 context 取消才是致命错误。
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+					errCh <- fmt.Errorf("uplink read: %w", err)
+					return
+				}
+				// 可恢复错误（source/destination not allowed、malformed datagram 等）
+				// 静默跳过，不终止 session。
+				log.Printf("[server] session %s uplink drop: %v", sessionID, err)
+				continue
 			}
 			if n <= 0 {
 				continue
 			}
 
 			if err := s.tunDevice.WritePacket(buf[:n]); err != nil {
-				errCh <- fmt.Errorf("uplink write to tun: %w", err)
-				return
+				// TUN 写入失败通常是单包问题（invalid offset、畸形包）；
+				// 同样只记录日志，不终止 session。
+				log.Printf("[server] session %s tun write drop: %v", sessionID, err)
+				continue
 			}
 			if m := observability.Global; m != nil {
 				m.AddRx(sessionID, n)

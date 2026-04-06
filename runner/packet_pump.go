@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,9 +124,13 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 					continue
 				}
 				if err := p.Tunnel.WritePacket(bufs[i][:sizes[i]]); err != nil {
+					if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+						signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
+						return
+					}
+					// 单包发送失败（如 MTU 超限被拒）视为可恢复，丢包继续。
 					p.stats.Drops.Add(1)
-					signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
-					return
+					continue
 				}
 				p.stats.TxPackets.Add(1)
 				p.stats.TxBytes.Add(uint64(sizes[i]))
@@ -160,9 +165,13 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 
 			// 单包写入（Tunnel 侧暂不支持批量）
 			if err := p.Dev.WritePacket(buf[:n]); err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+					signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
+					return
+				}
+				// 单包写 TUN 失败（如畸形包、invalid offset 边界情况）视为可恢复。
 				p.stats.Drops.Add(1)
-				signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
-				return
+				continue
 			}
 
 			p.stats.RxPackets.Add(1)
@@ -237,9 +246,12 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 			}
 
 			if err := p.Tunnel.WritePacket(buf[:n]); err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+					signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
+					return
+				}
 				p.stats.Drops.Add(1)
-				signalErr(fmt.Errorf("packet pump tun->tunnel write: %w", err))
-				return
+				continue
 			}
 
 			p.stats.TxPackets.Add(1)
@@ -273,9 +285,12 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 			}
 
 			if err := p.Dev.WritePacket(buf[:n]); err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+					signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
+					return
+				}
 				p.stats.Drops.Add(1)
-				signalErr(fmt.Errorf("packet pump tunnel->tun write: %w", err))
-				return
+				continue
 			}
 
 			p.stats.RxPackets.Add(1)

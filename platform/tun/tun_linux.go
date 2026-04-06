@@ -40,8 +40,12 @@ type linuxDevice struct {
 	closeOnce sync.Once
 
 	// 单包模式缓存，避免热路径分配
-	singleBufs [][]byte
+	singleBufs  [][]byte
 	singleSizes []int
+
+	// writeBuf 预分配写缓冲区，头部留 virtioNetHdrLen 字节 offset 空间。
+	// wireguard-go 在 vnetHdr=true 时要求 buf 头部有此空间，Write(bufs, virtioNetHdrLen)。
+	writeBuf []byte
 }
 
 func (d *linuxDevice) Name() (string, error) {
@@ -74,6 +78,12 @@ func (d *linuxDevice) ReadPacket(buf []byte) (int, error) {
 	return d.singleSizes[0], nil
 }
 
+// virtioNetHdrLen 是 Linux virtio_net_hdr 结构体的大小（10 字节）。
+// wireguard-go 在内核支持 virtio_net_hdr 时（vnetHdr=true），要求 Write 调用者
+// 在 buf 头部预留 virtioNetHdrLen 字节作为 offset 区域，否则会返回 "invalid offset"。
+// 即使 vnetHdr=false，多传 offset=virtioNetHdrLen 也是安全的（wireguard-go 会直接跳过头部）。
+const virtioNetHdrLen = 10
+
 func (d *linuxDevice) WritePacket(pkt []byte) error {
 	if len(pkt) == 0 {
 		return nil
@@ -81,8 +91,16 @@ func (d *linuxDevice) WritePacket(pkt []byte) error {
 	if d.singleBufs == nil {
 		d.singleBufs = make([][]byte, 1)
 	}
-	d.singleBufs[0] = pkt
-	n, err := d.dev.Write(d.singleBufs, 0)
+	// 在包数据前预留 virtioNetHdrLen 字节，供 wireguard-go 写入 virtio_net_hdr。
+	// 使用预分配的 writeBuf 避免热路径堆分配；按需扩容（通常 MTU 固定，不会反复扩容）。
+	need := virtioNetHdrLen + len(pkt)
+	if cap(d.writeBuf) < need {
+		d.writeBuf = make([]byte, need)
+	}
+	d.writeBuf = d.writeBuf[:need]
+	copy(d.writeBuf[virtioNetHdrLen:], pkt)
+	d.singleBufs[0] = d.writeBuf
+	n, err := d.dev.Write(d.singleBufs, virtioNetHdrLen)
 	if err != nil {
 		return err
 	}
