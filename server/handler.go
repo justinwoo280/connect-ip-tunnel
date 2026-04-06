@@ -88,6 +88,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 广播全路由，允许客户端通过此隧道转发任意目标地址的流量。
+	// RFC 9484 要求服务端通过 ROUTE_ADVERTISEMENT capsule 明确告知客户端
+	// 哪些路由可用；若不广播，connect-ip-go 库会拒绝所有非分配地址的数据包。
+	// IPProtocol=0 表示允许所有协议。
+	fullRoutes := []connectipgo.IPRoute{
+		{StartIP: netip.MustParseAddr("0.0.0.0"), EndIP: netip.MustParseAddr("255.255.255.255"), IPProtocol: 0},
+		{StartIP: netip.MustParseAddr("::"), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"), IPProtocol: 0},
+	}
+	if err := conn.AdvertiseRoute(r.Context(), fullRoutes); err != nil {
+		log.Printf("[server] advertise routes failed: %v", err)
+		s.ipPool.ReleaseIP(sessionID)
+		_ = conn.Close()
+		return
+	}
+
 	// 7. 创建会话并注册到分发器
 	session := newSessionWithIP(conn, s.tunDevice, r.RemoteAddr, sessionID, ipv4Prefix, ipv6Prefix)
 
