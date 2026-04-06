@@ -102,6 +102,32 @@ func (s *Server) Start() error {
 		}
 		s.tunIfName = ifName
 
+		// 创建 IP 地址池
+		ipPool, err := NewIPPool(s.cfg.IPv4Pool, s.cfg.IPv6Pool)
+		if err != nil {
+			startErr = fmt.Errorf("server: create ip pool: %w", err)
+			return
+		}
+		s.ipPool = ipPool
+		log.Printf("[server] ip pool ready: ipv4=%s ipv6=%s", s.cfg.IPv4Pool, s.cfg.IPv6Pool)
+
+		// 派生 TUN 网关 IP：若配置未指定，自动从 IP 池取网关地址（池内第一个可用 IP）
+		// 例如 pool=10.233.0.0/16 → tun IP=10.233.0.1/16
+		tunIPv4 := s.cfg.TUN.IPv4CIDR
+		tunIPv6 := s.cfg.TUN.IPv6CIDR
+		if tunIPv4 == "" && s.cfg.IPv4Pool != "" {
+			if gw, err := ipPool.GatewayIPv4(); err == nil {
+				tunIPv4 = gw
+				log.Printf("[server] tun ipv4 (auto): %s", tunIPv4)
+			}
+		}
+		if tunIPv6 == "" && s.cfg.IPv6Pool != "" {
+			if gw, err := ipPool.GatewayIPv6(); err == nil {
+				tunIPv6 = gw
+				log.Printf("[server] tun ipv6 (auto): %s", tunIPv6)
+			}
+		}
+
 		// 配置路由管理器
 		clientPools := []string{}
 		if s.cfg.IPv4Pool != "" {
@@ -111,21 +137,12 @@ func (s *Server) Start() error {
 			clientPools = append(clientPools, s.cfg.IPv6Pool)
 		}
 
-		routingMgr, err := NewRoutingManager(ifName, s.cfg.TUN.IPv4CIDR, s.cfg.TUN.IPv6CIDR, clientPools)
+		routingMgr, err := NewRoutingManager(ifName, tunIPv4, tunIPv6, clientPools)
 		if err != nil {
 			startErr = fmt.Errorf("server: create routing manager: %w", err)
 			return
 		}
 		s.routingMgr = routingMgr
-
-		// 创建 IP 地址池
-		ipPool, err := NewIPPool(s.cfg.IPv4Pool, s.cfg.IPv6Pool)
-		if err != nil {
-			startErr = fmt.Errorf("server: create ip pool: %w", err)
-			return
-		}
-		s.ipPool = ipPool
-		log.Printf("[server] ip pool ready: ipv4=%s ipv6=%s", s.cfg.IPv4Pool, s.cfg.IPv6Pool)
 
 		tunCfg := tun.NewConfigurator()
 		s.tunConfigurator = tunCfg

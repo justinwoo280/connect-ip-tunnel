@@ -270,18 +270,45 @@ func removeNRPTRule() error {
 	return nil
 }
 
+// deriveGatewayV4 派生 IPv4 路由的 nexthop 地址。
+//
+// Windows netsh route add 必须指定一个 nexthop，但 Connect-IP 分配的是 /32 单主机地址，
+// 不存在"同网段网关"的概念。
+// 处理策略：
+//   - /32：用接口自身 IP 作为 nexthop（on-link 语义，Windows 支持）
+//   - 其他前缀长度：用网段的第一个可用地址（.1）作为 nexthop，
+//     若该地址恰好是接口自身 IP，则顺延到下一个地址
 func deriveGatewayV4(prefix netip.Prefix) string {
+	addr := prefix.Addr().Unmap()
+	// /32 单主机路由：nexthop 用自身 IP（on-link）
+	if prefix.Bits() == 32 {
+		return addr.String()
+	}
+	// 其他前缀：取网段第一个可用地址（网络地址 .Next() = .1）
 	gw := prefix.Masked().Addr().Next()
-	if gw == prefix.Addr().Unmap() {
+	if gw == addr {
 		gw = gw.Next()
+	}
+	// 确保 nexthop 仍在前缀内
+	if !prefix.Contains(gw) {
+		return addr.String() // 退回 on-link
 	}
 	return gw.String()
 }
 
+// deriveGatewayV6 派生 IPv6 路由的 nexthop 地址，逻辑同 deriveGatewayV4。
 func deriveGatewayV6(prefix netip.Prefix) string {
+	addr := prefix.Addr()
+	// /128 单主机路由：nexthop 用自身 IP（on-link）
+	if prefix.Bits() == 128 {
+		return addr.String()
+	}
 	gw := prefix.Masked().Addr().Next()
-	if gw == prefix.Addr() {
+	if gw == addr {
 		gw = gw.Next()
+	}
+	if !prefix.Contains(gw) {
+		return addr.String()
 	}
 	return gw.String()
 }

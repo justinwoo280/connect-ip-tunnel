@@ -46,8 +46,8 @@ func NewIPPool(ipv4Pool, ipv6Pool string) (*IPPool, error) {
 			return nil, fmt.Errorf("parse ipv4 pool: %w", err)
 		}
 		pool.ipv4Pool = prefix
-		// 从地址池的第二个 IP 开始分配（第一个通常是网关）
-		pool.nextIPv4 = prefix.Addr().Next()
+		// .0 网络地址，.1 作为 TUN 网关 IP，客户端从 .2 开始分配
+		pool.nextIPv4 = prefix.Addr().Next().Next()
 	}
 
 	// 解析 IPv6 地址池
@@ -57,10 +57,38 @@ func NewIPPool(ipv4Pool, ipv6Pool string) (*IPPool, error) {
 			return nil, fmt.Errorf("parse ipv6 pool: %w", err)
 		}
 		pool.ipv6Pool = prefix
-		pool.nextIPv6 = prefix.Addr().Next()
+		// ::0 网络地址，::1 作为 TUN 网关 IP，客户端从 ::2 开始分配
+		pool.nextIPv6 = prefix.Addr().Next().Next()
 	}
 
 	return pool, nil
+}
+
+// GatewayIPv4 返回 IPv4 池的 TUN 网关地址，格式为 CIDR（如 "10.233.0.1/16"）。
+// 网关取池的第二个地址（.1），池的第一个地址（.0）是网络地址不可用。
+// 客户端从第三个地址（.2）开始分配。
+func (p *IPPool) GatewayIPv4() (string, error) {
+	if !p.ipv4Pool.IsValid() {
+		return "", fmt.Errorf("no ipv4 pool configured")
+	}
+	// .0 是网络地址，.1 是网关（TUN IP），客户端从 .2 开始
+	gw := p.ipv4Pool.Addr().Next() // 10.233.0.0 → 10.233.0.1
+	if !p.ipv4Pool.Contains(gw) {
+		return "", fmt.Errorf("ipv4 pool too small for gateway")
+	}
+	return netip.PrefixFrom(gw, p.ipv4Pool.Bits()).String(), nil
+}
+
+// GatewayIPv6 返回 IPv6 池的 TUN 网关地址，格式为 CIDR（如 "fd00::1/64"）。
+func (p *IPPool) GatewayIPv6() (string, error) {
+	if !p.ipv6Pool.IsValid() {
+		return "", fmt.Errorf("no ipv6 pool configured")
+	}
+	gw := p.ipv6Pool.Addr().Next() // fd00:: → fd00::1
+	if !p.ipv6Pool.Contains(gw) {
+		return "", fmt.Errorf("ipv6 pool too small for gateway")
+	}
+	return netip.PrefixFrom(gw, p.ipv6Pool.Bits()).String(), nil
 }
 
 // AllocateIP 为会话分配 IP 地址

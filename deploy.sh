@@ -279,10 +279,16 @@ collect_config() {
     echo ""
     if prompt_yn "启用 NAT（让客户端流量通过服务器上网）？" "y"; then
         ENABLE_NAT="true"
-        # 自动检测默认网卡
-        local default_iface
-        default_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' || echo "")
-        NAT_IFACE=$(prompt "NAT 出口网卡（留空自动检测）" "$default_iface")
+        if [[ "$DEPLOY_MODE" == "docker" ]]; then
+            # Docker 模式：容器内网卡名与宿主机不同，留空让服务端在容器内自动检测
+            NAT_IFACE=""
+            info "Docker 模式：NAT 出口网卡将在容器内自动检测"
+        else
+            # systemd 裸机模式：自动检测宿主机默认网卡
+            local default_iface
+            default_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' || echo "")
+            NAT_IFACE=$(prompt "NAT 出口网卡（留空自动检测）" "$default_iface")
+        fi
     else
         ENABLE_NAT="false"
     fi

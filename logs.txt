@@ -1,0 +1,63 @@
+root@instance-20250815-0052:~# docker exec connect-ip-server cat /etc/connect-ip-tunnel/config.json
+{
+  "mode": "server",
+  "server": {
+    "listen": ":443",
+    "uri_template": "https://au.q.azstu.art/.well-known/masque/ip",
+    "admin_listen": ":9090",
+    "tun": {
+      "name": "tun0",
+      "mtu": 1400
+    },
+    "tls": {
+      "cert_file":           "/etc/connect-ip-tunnel/certs/server.crt",
+      "key_file":            "/etc/connect-ip-tunnel/certs/server.key",
+      "enable_mtls":         true,
+      "client_ca_file":      "/etc/connect-ip-tunnel/certs/ca.crt",
+      "enable_pqc":          true,
+      "enable_session_cache": true,
+      "session_cache_size":  256,
+      "crl_url":             "https://127.0.0.1:8443/crl.pem",
+      "crl_interval":        "10m"
+    },
+    "http3": {
+      "enable_datagrams":        true,
+      "max_idle_timeout":        "60s",
+      "keep_alive_period":       "20s",
+      "disable_path_mtu_probe":  false,
+      "initial_stream_window":   16777216,
+      "max_stream_window":       67108864,
+      "initial_conn_window":     33554432,
+      "max_conn_window":         134217728
+    },
+    "ipv4_pool":    "10.233.0.0/16",
+    "ipv6_pool":    "fd00::/64",
+    "enable_nat":   true,
+    "nat_interface": "",
+    "certsrv": {
+      "listen":       ":8443",
+      "db_path":      "/var/lib/connect-ip-tunnel/certsrv.db",
+      "ca_cert_file": "/etc/connect-ip-tunnel/certs/ca.crt",
+      "ca_key_file":  "/etc/connect-ip-tunnel/certs/ca.key"
+    }
+  }
+}
+root@instance-20250815-0052:~# docker logs connect-ip-server 2>&1 | grep -E "routing|tun"
+2026/04/05 16:38:24 connect-ip-tunnel dev starting in server mode
+2026/04/05 16:38:24 [routing] setting up server routing for tun0
+2026/04/05 16:38:24 [routing] client pool route: 10.233.0.0/16 -> tun0
+2026/04/05 16:38:24 [routing] client pool route: fd00::/64 -> tun0
+2026/04/05 16:38:24 [routing] ip forwarding enabled
+2026/04/05 16:38:24 [routing] nat enabled: tun0 -> enp0s6
+2026/04/05 16:38:24 [server] tun ready: if=tun0 mtu=1400
+2026/04/05 16:38:24 [server] started: listen=:443 tun=tun0
+2026/04/05 17:21:36 [routing] tearing down server routing for tun0
+2026/04/05 17:21:36 connect-ip-tunnel dev starting in server mode
+2026/04/05 17:21:36 [routing] setting up server routing for tun0
+2026/04/05 17:21:36 [routing] client pool route: 10.233.0.0/16 -> tun0
+2026/04/05 17:21:36 [routing] client pool route: fd00::/64 -> tun0
+2026/04/05 17:21:36 [routing] ip forwarding enabled
+2026/04/05 17:21:36 [routing] nat enabled: tun0 -> eth0
+2026/04/05 17:21:36 [server] tun ready: if=tun0 mtu=1400
+2026/04/05 17:21:36 [server] started: listen=:443 tun=tun0
+root@instance-20250815-0052:~# 
