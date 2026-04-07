@@ -344,38 +344,88 @@ func (e *Engine) runMultiSessionPump(ctx context.Context, pool *MultiSessionPool
 	}
 
 	// 上行：TUN → flow hash → 对应 session
-	// 热路径优化：去掉每次迭代的 select/ctx 检查，仅在 err 时检查 ctx。
-	// ReadPacket 在 ctx 取消（TUN 关闭）时会立即返回错误，无需轮询 ctx.Done()。
+	// 优先使用批量读接口（wireguard-go GRO 模式下 BatchSize > 1），避免 GRO 丢包。
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, bufSize)
-		for {
-			n, err := e.tunDevice.ReadPacket(buf)
-			if err != nil {
-				if pumpCtx.Err() != nil {
+
+		// 检测批量读能力
+		type batchReader interface {
+			BatchSize() int
+			Read(bufs [][]byte, sizes []int, offset int) (int, error)
+		}
+
+		if br, ok := e.tunDevice.(batchReader); ok {
+			batchSize := br.BatchSize()
+			if batchSize <= 0 {
+				batchSize = 1
+			}
+			bufs := make([][]byte, batchSize)
+			for i := range bufs {
+				bufs[i] = make([]byte, bufSize)
+			}
+			sizes := make([]int, batchSize)
+
+			for {
+				n, err := br.Read(bufs, sizes, 0)
+				if err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
+					select {
+					case errCh <- fmt.Errorf("multi pump tun read: %w", err):
+					default:
+					}
+					cancel()
 					return
 				}
-				select {
-				case errCh <- fmt.Errorf("multi pump tun read: %w", err):
-				default:
+				for i := 0; i < n; i++ {
+					if sizes[i] <= 0 {
+						continue
+					}
+					if err := pool.WritePacket(bufs[i][:sizes[i]]); err != nil {
+						if pumpCtx.Err() != nil {
+							return
+						}
+						select {
+						case errCh <- fmt.Errorf("multi pump session write: %w", err):
+						default:
+						}
+						cancel()
+						return
+					}
 				}
-				cancel()
-				return
 			}
-			if n <= 0 {
-				continue
-			}
-			if err := pool.WritePacket(buf[:n]); err != nil {
-				if pumpCtx.Err() != nil {
+		} else {
+			// 降级：单包模式（非 Linux 平台）
+			buf := make([]byte, bufSize)
+			for {
+				n, err := e.tunDevice.ReadPacket(buf)
+				if err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
+					select {
+					case errCh <- fmt.Errorf("multi pump tun read: %w", err):
+					default:
+					}
+					cancel()
 					return
 				}
-				select {
-				case errCh <- fmt.Errorf("multi pump session write: %w", err):
-				default:
+				if n <= 0 {
+					continue
 				}
-				cancel()
-				return
+				if err := pool.WritePacket(buf[:n]); err != nil {
+					if pumpCtx.Err() != nil {
+						return
+					}
+					select {
+					case errCh <- fmt.Errorf("multi pump session write: %w", err):
+					default:
+					}
+					cancel()
+					return
+				}
 			}
 		}
 	}()

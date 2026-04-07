@@ -107,10 +107,25 @@ func hostRouteAddr(prefix netip.Prefix) (netip.Addr, bool) {
 }
 
 // Run 启动 TUN 读取循环，根据目的 IP 将包分发到匹配的 session。
+// 使用批量读取接口（wireguard-go GRO 模式下 BatchSize > 1），避免单 buf 溢出。
 // 阻塞直到 context 取消或读取错误。
 func (d *PacketDispatcher) Run(ctx context.Context) error {
-	buf := bufferpool.GetPacket()
-	defer bufferpool.PutPacket(buf)
+	batchSize := d.dev.BatchSize()
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	// 按 batchSize 分配足够的 buf 槽，每槽 65536 字节
+	bufs := make([][]byte, batchSize)
+	sizes := make([]int, batchSize)
+	for i := range bufs {
+		bufs[i] = bufferpool.GetPacket()
+	}
+	defer func() {
+		for _, b := range bufs {
+			bufferpool.PutPacket(b)
+		}
+	}()
 
 	for {
 		select {
@@ -119,38 +134,43 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 		default:
 		}
 
-		n, err := d.dev.ReadPacket(buf)
+		n, err := d.dev.Read(bufs, sizes, 0)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			log.Printf("[dispatcher] error: %v", err)
 			return err
 		}
-		if n <= 0 {
-			continue
-		}
 
-		pkt := buf[:n]
-		dstAddr, ok := parseDstAddr(pkt)
-		if !ok {
-			continue
-		}
+		for i := 0; i < n; i++ {
+			pktLen := sizes[i]
+			if pktLen <= 0 {
+				continue
+			}
 
-		target := d.lookupSession(dstAddr)
-		if target == nil {
-			// 无匹配 session，丢弃
-			continue
-		}
+			pkt := bufs[i][:pktLen]
+			dstAddr, ok := parseDstAddr(pkt)
+			if !ok {
+				continue
+			}
 
-		// 复制包数据（buf 会被复用）
-		pktCopy := bufferpool.GetPacket()[:n]
-		copy(pktCopy, pkt)
+			target := d.lookupSession(dstAddr)
+			if target == nil {
+				// 无匹配 session，丢弃
+				continue
+			}
 
-		// 尝试发送，满了就丢弃（避免阻塞 TUN 读取）
-		select {
-		case target.inbound <- pktCopy:
-		default:
-			bufferpool.PutPacket(pktCopy)
+			// 复制包数据（bufs[i] 会被复用）
+			pktCopy := bufferpool.GetPacket()[:pktLen]
+			copy(pktCopy, pkt)
+
+			// 尝试发送，满了就丢弃（避免阻塞 TUN 读取）
+			select {
+			case target.inbound <- pktCopy:
+			default:
+				bufferpool.PutPacket(pktCopy)
+			}
 		}
 	}
 }
