@@ -59,8 +59,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. 分配 IP 地址给客户端
+	// 用 mTLS 证书 Subject 作为 clientKey，同一客户端的多个并行 session 复用同一 IP。
+	// 未启用 mTLS 时退化为 RemoteAddr，保证单 session 场景仍可正常工作。
+	clientKey := r.RemoteAddr
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		clientKey = r.TLS.PeerCertificates[0].Subject.String()
+	}
+
 	sessionID := generateSessionID()
-	ipv4Prefix, ipv6Prefix, err := s.ipPool.AllocateIP(sessionID)
+	ipv4Prefix, ipv6Prefix, err := s.ipPool.AllocateIP(clientKey, sessionID)
 	if err != nil {
 		log.Printf("[server] allocate ip failed: %v", err)
 		_ = conn.Close()

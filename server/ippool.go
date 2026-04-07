@@ -6,19 +6,26 @@ import (
 	"sync"
 )
 
-// IPPool 管理客户端 IP 地址分配
-// 类似 WireGuard 的 AllowedIPs，但通过 CONNECT-IP 的 ADDRESS_ASSIGN capsule 实现
+// IPPool 管理客户端 IP 地址分配。
+// 支持多 session 复用同一 IP：同一 clientKey（mTLS 证书 CN）的多个 session 共享同一 IP，
+// 只有该 clientKey 的最后一个 session 释放时才真正归还 IP。
 type IPPool struct {
 	ipv4Pool netip.Prefix
 	ipv6Pool netip.Prefix
 
-	// 已分配的 IP 地址
-	allocatedIPv4 map[netip.Addr]string // IP -> SessionID
+	// clientKey -> IP（核心分配表）
+	clientIPv4 map[string]netip.Addr
+	clientIPv6 map[string]netip.Addr
+
+	// IP -> clientKey（反向查找）
+	allocatedIPv4 map[netip.Addr]string
 	allocatedIPv6 map[netip.Addr]string
 
-	// 反向索引：session -> IP
-	sessionIPv4 map[string]netip.Addr
-	sessionIPv6 map[string]netip.Addr
+	// clientKey -> []sessionID（引用计数：记录哪些 session 属于同一客户端）
+	clientSessions map[string][]string
+
+	// sessionID -> clientKey（快速反查）
+	sessionToClient map[string]string
 
 	// 已释放可复用的 IP
 	freeIPv4 []netip.Addr
@@ -33,10 +40,12 @@ type IPPool struct {
 
 func NewIPPool(ipv4Pool, ipv6Pool string) (*IPPool, error) {
 	pool := &IPPool{
-		allocatedIPv4: make(map[netip.Addr]string),
-		allocatedIPv6: make(map[netip.Addr]string),
-		sessionIPv4:   make(map[string]netip.Addr),
-		sessionIPv6:   make(map[string]netip.Addr),
+		clientIPv4:      make(map[string]netip.Addr),
+		clientIPv6:      make(map[string]netip.Addr),
+		allocatedIPv4:   make(map[netip.Addr]string),
+		allocatedIPv6:   make(map[netip.Addr]string),
+		clientSessions:  make(map[string][]string),
+		sessionToClient: make(map[string]string),
 	}
 
 	// 解析 IPv4 地址池
@@ -91,52 +100,58 @@ func (p *IPPool) GatewayIPv6() (string, error) {
 	return netip.PrefixFrom(gw, p.ipv6Pool.Bits()).String(), nil
 }
 
-// AllocateIP 为会话分配 IP 地址
-// 返回分配的 IPv4 和 IPv6 前缀（用于 ADDRESS_ASSIGN capsule）
-func (p *IPPool) AllocateIP(sessionID string) (ipv4Prefix, ipv6Prefix netip.Prefix, err error) {
+// AllocateIP 为会话分配 IP 地址。
+//
+// clientKey 是客户端的唯一标识（mTLS 场景下用证书 CN/Subject），
+// 同一 clientKey 的多个 session（多路并行）复用同一 IP，
+// 避免多 session 模式下各 session 分配到不同 IP 导致源地址校验失败。
+//
+// sessionID 用于追踪哪些 session 属于同一客户端（用于 ReleaseIP 引用计数）。
+func (p *IPPool) AllocateIP(clientKey, sessionID string) (ipv4Prefix, ipv6Prefix netip.Prefix, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 同一 session 重入时优先复用已分配地址，保持幂等。
-	if ipv4, ok := p.sessionIPv4[sessionID]; ok {
+	// 同一 clientKey 已有分配，直接复用并记录新 session。
+	if ipv4, ok := p.clientIPv4[clientKey]; ok {
+		p.sessionToClient[sessionID] = clientKey
+		p.clientSessions[clientKey] = append(p.clientSessions[clientKey], sessionID)
 		ipv4Prefix = netip.PrefixFrom(ipv4, 32)
-	}
-	if ipv6, ok := p.sessionIPv6[sessionID]; ok {
-		ipv6Prefix = netip.PrefixFrom(ipv6, 128)
-	}
-	if ipv4Prefix.IsValid() || ipv6Prefix.IsValid() {
+		if ipv6, ok := p.clientIPv6[clientKey]; ok {
+			ipv6Prefix = netip.PrefixFrom(ipv6, 128)
+		}
 		return ipv4Prefix, ipv6Prefix, nil
 	}
 
-	// 分配 IPv4
+	// 新客户端，分配新 IP
 	if p.ipv4Pool.IsValid() {
-		ipv4, err := p.allocateIPv4(sessionID)
+		ipv4, err := p.allocateIPv4(clientKey)
 		if err != nil {
 			return netip.Prefix{}, netip.Prefix{}, fmt.Errorf("allocate ipv4: %w", err)
 		}
 		ipv4Prefix = netip.PrefixFrom(ipv4, 32)
 	}
 
-	// 分配 IPv6
 	if p.ipv6Pool.IsValid() {
-		ipv6, err := p.allocateIPv6(sessionID)
+		ipv6, err := p.allocateIPv6(clientKey)
 		if err != nil {
 			if ipv4Prefix.IsValid() {
-				p.releaseIPv4Locked(sessionID)
+				p.releaseIPv4Locked(clientKey)
 			}
 			return netip.Prefix{}, netip.Prefix{}, fmt.Errorf("allocate ipv6: %w", err)
 		}
 		ipv6Prefix = netip.PrefixFrom(ipv6, 128)
 	}
 
+	p.sessionToClient[sessionID] = clientKey
+	p.clientSessions[clientKey] = append(p.clientSessions[clientKey], sessionID)
 	return ipv4Prefix, ipv6Prefix, nil
 }
 
-// allocateIPv4 分配一个 IPv4 地址
-func (p *IPPool) allocateIPv4(sessionID string) (netip.Addr, error) {
+// allocateIPv4 分配一个 IPv4 地址（按 clientKey）
+func (p *IPPool) allocateIPv4(clientKey string) (netip.Addr, error) {
 	if addr, ok := p.popFreeIPv4Locked(); ok {
-		p.allocatedIPv4[addr] = sessionID
-		p.sessionIPv4[sessionID] = addr
+		p.allocatedIPv4[addr] = clientKey
+		p.clientIPv4[clientKey] = addr
 		return addr, nil
 	}
 
@@ -146,8 +161,8 @@ func (p *IPPool) allocateIPv4(sessionID string) (netip.Addr, error) {
 	}
 	for p.ipv4Pool.Contains(current) {
 		if _, exists := p.allocatedIPv4[current]; !exists {
-			p.allocatedIPv4[current] = sessionID
-			p.sessionIPv4[sessionID] = current
+			p.allocatedIPv4[current] = clientKey
+			p.clientIPv4[clientKey] = current
 			p.nextIPv4 = current.Next()
 			return current, nil
 		}
@@ -156,11 +171,11 @@ func (p *IPPool) allocateIPv4(sessionID string) (netip.Addr, error) {
 	return netip.Addr{}, fmt.Errorf("ipv4 pool exhausted")
 }
 
-// allocateIPv6 分配一个 IPv6 地址
-func (p *IPPool) allocateIPv6(sessionID string) (netip.Addr, error) {
+// allocateIPv6 分配一个 IPv6 地址（按 clientKey）
+func (p *IPPool) allocateIPv6(clientKey string) (netip.Addr, error) {
 	if addr, ok := p.popFreeIPv6Locked(); ok {
-		p.allocatedIPv6[addr] = sessionID
-		p.sessionIPv6[sessionID] = addr
+		p.allocatedIPv6[addr] = clientKey
+		p.clientIPv6[clientKey] = addr
 		return addr, nil
 	}
 
@@ -170,8 +185,8 @@ func (p *IPPool) allocateIPv6(sessionID string) (netip.Addr, error) {
 	}
 	for p.ipv6Pool.Contains(current) {
 		if _, exists := p.allocatedIPv6[current]; !exists {
-			p.allocatedIPv6[current] = sessionID
-			p.sessionIPv6[sessionID] = current
+			p.allocatedIPv6[current] = clientKey
+			p.clientIPv6[clientKey] = current
 			p.nextIPv6 = current.Next()
 			return current, nil
 		}
@@ -212,39 +227,63 @@ func (p *IPPool) popFreeIPv6Locked() (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// ReleaseIP 释放会话的 IP 地址
+// ReleaseIP 释放一个 session 的引用。
+// 只有当 clientKey 的所有 session 都释放后，IP 才真正归还到池中。
 func (p *IPPool) ReleaseIP(sessionID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.releaseIPv4Locked(sessionID)
-	p.releaseIPv6Locked(sessionID)
+	clientKey, ok := p.sessionToClient[sessionID]
+	if !ok {
+		return
+	}
+	delete(p.sessionToClient, sessionID)
+
+	// 从 clientSessions 里移除此 session
+	sessions := p.clientSessions[clientKey]
+	newSessions := sessions[:0]
+	for _, s := range sessions {
+		if s != sessionID {
+			newSessions = append(newSessions, s)
+		}
+	}
+	if len(newSessions) > 0 {
+		p.clientSessions[clientKey] = newSessions
+		return // 还有其他 session 在用，不释放 IP
+	}
+
+	// 最后一个 session 释放，真正归还 IP
+	delete(p.clientSessions, clientKey)
+	p.releaseIPv4Locked(clientKey)
+	p.releaseIPv6Locked(clientKey)
 }
 
-func (p *IPPool) releaseIPv4Locked(sessionID string) {
-	if ip, ok := p.sessionIPv4[sessionID]; ok {
-		delete(p.sessionIPv4, sessionID)
+func (p *IPPool) releaseIPv4Locked(clientKey string) {
+	if ip, ok := p.clientIPv4[clientKey]; ok {
+		delete(p.clientIPv4, clientKey)
 		delete(p.allocatedIPv4, ip)
 		p.freeIPv4 = append(p.freeIPv4, ip)
 	}
 }
 
-func (p *IPPool) releaseIPv6Locked(sessionID string) {
-	if ip, ok := p.sessionIPv6[sessionID]; ok {
-		delete(p.sessionIPv6, sessionID)
+func (p *IPPool) releaseIPv6Locked(clientKey string) {
+	if ip, ok := p.clientIPv6[clientKey]; ok {
+		delete(p.clientIPv6, clientKey)
 		delete(p.allocatedIPv6, ip)
 		p.freeIPv6 = append(p.freeIPv6, ip)
 	}
 }
 
-// GetAllocatedIPs 获取会话已分配的 IP 地址
+// GetAllocatedIPs 获取 session 对应客户端已分配的 IP 地址
 func (p *IPPool) GetAllocatedIPs(sessionID string) (ipv4, ipv6 netip.Addr) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	ipv4 = p.sessionIPv4[sessionID]
-	ipv6 = p.sessionIPv6[sessionID]
-	return ipv4, ipv6
+	clientKey, ok := p.sessionToClient[sessionID]
+	if !ok {
+		return netip.Addr{}, netip.Addr{}
+	}
+	return p.clientIPv4[clientKey], p.clientIPv6[clientKey]
 }
 
 // Stats 返回地址池统计信息
@@ -262,14 +301,7 @@ func (p *IPPool) Stats() IPPoolStats {
 }
 
 func (p *IPPool) countUniqueSessions() int {
-	sessions := make(map[string]struct{}, len(p.sessionIPv4)+len(p.sessionIPv6))
-	for sid := range p.sessionIPv4 {
-		sessions[sid] = struct{}{}
-	}
-	for sid := range p.sessionIPv6 {
-		sessions[sid] = struct{}{}
-	}
-	return len(sessions)
+	return len(p.sessionToClient)
 }
 
 type IPPoolStats struct {

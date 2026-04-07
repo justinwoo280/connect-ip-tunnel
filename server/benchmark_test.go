@@ -65,7 +65,7 @@ func BenchmarkIPPoolAllocate(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		id := fmt.Sprintf("s-%d", i)
-		_, _, err := pool.AllocateIP(id)
+		_, _, err := pool.AllocateIP(id, id+"-s")
 		if err != nil {
 			// 池满后释放所有 session，重新开始
 			for j := 0; j < i; j++ {
@@ -87,7 +87,7 @@ func BenchmarkIPPoolAllocateReleaseCycle(b *testing.B) {
 
 	// 预分配 64 个 session，模拟在线会话
 	for i := 0; i < 64; i++ {
-		pool.AllocateIP(fmt.Sprintf("pre-%d", i))
+		pool.AllocateIP(fmt.Sprintf("pre-%d", i), fmt.Sprintf("pre-%d-s", i))
 	}
 
 	b.ResetTimer()
@@ -96,7 +96,7 @@ func BenchmarkIPPoolAllocateReleaseCycle(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		id := fmt.Sprintf("bench-%d", i%64)
 		pool.ReleaseIP(id)
-		pool.AllocateIP(id)
+		pool.AllocateIP(id, id+"-s")
 	}
 }
 
@@ -110,7 +110,7 @@ func BenchmarkIPPoolReleaseO1(b *testing.B) {
 			}
 			// 预分配 n 个
 			for i := 0; i < n; i++ {
-				pool.AllocateIP(fmt.Sprintf("s-%d", i))
+				pool.AllocateIP(fmt.Sprintf("s-%d", i), fmt.Sprintf("s-%d-s", i))
 			}
 
 			b.ResetTimer()
@@ -119,7 +119,7 @@ func BenchmarkIPPoolReleaseO1(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				id := fmt.Sprintf("s-%d", i%n)
 				pool.ReleaseIP(id)
-				pool.AllocateIP(id)
+				pool.AllocateIP(id, id+"-s")
 			}
 		})
 	}

@@ -198,11 +198,14 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 		}
 	}
 
+	// 清理上次可能残留的状态（应对进程被强制 kill 的情况）
+	restoreOtherDNS(ifName)
+	_ = removeNRPTRule()
 	suppressOtherDNS(ifName)
+	// 重新应用 NRPT 规则
 	if cfg.DNSv4 != "" {
 		if err := applyNRPTRule(cfg.DNSv4); err != nil {
-			// NRPT 非关键路径，记录警告即可。
-			_ = err
+			log.Printf("[tun] NRPT rule apply failed (non-fatal): %v", err)
 		}
 	}
 	_ = run("ipconfig", "/flushdns")
