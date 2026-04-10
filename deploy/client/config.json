@@ -22,7 +22,10 @@
       "initial_stream_window":   16777216,
       "max_stream_window":       67108864,
       "initial_conn_window":     33554432,
-      "max_conn_window":         134217728
+      "max_conn_window":         134217728,
+      "congestion": {
+        "algorithm": "bbr2"
+      }
     },
     "connect_ip": {
       "addr":                     "server:443",

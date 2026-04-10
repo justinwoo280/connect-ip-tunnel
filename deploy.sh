@@ -39,6 +39,7 @@ SERVER_CN="connect-ip-server"         # 证书 CN / SAN
 SERVER_HOSTNAME=""                     # 客户端连接用的主机名（uri_template / authority）
 CERTSRV_PORT="8443"                   # certsrv 监听端口（留空则不启动）
 CERTSRV_ENABLED="true"
+CONGESTION_ALGO="bbr2"               # 拥塞控制算法：bbr2（推荐）或 cubic
 
 # Docker 相关
 DOCKER_IMAGE="connect-ip-tunnel:local"
@@ -223,6 +224,15 @@ gen_server_config() {
       \"crl_interval\":        \"10m\""
     fi
 
+    # 构建 congestion 配置块
+    local congestion_section=""
+    if [[ "$CONGESTION_ALGO" == "bbr2" ]]; then
+        congestion_section=",
+      \"congestion\": {
+        \"algorithm\": \"bbr2\"
+      }"
+    fi
+
     cat > "$config_file" <<EOF
 {
   "mode": "server",
@@ -251,7 +261,7 @@ gen_server_config() {
       "initial_stream_window":   16777216,
       "max_stream_window":       67108864,
       "initial_conn_window":     33554432,
-      "max_conn_window":         134217728
+      "max_conn_window":         134217728${congestion_section}
     },
     "ipv4_pool":    "${IPV4_POOL}",
     "ipv6_pool":    "${IPV6_POOL}",
@@ -297,6 +307,19 @@ collect_config() {
     SERVER_CN=$(prompt "证书 CN（域名或 IP，用于客户端验证）" "$(hostname -f 2>/dev/null || echo connect-ip-server)")
     SERVER_HOSTNAME=$(prompt "客户端连接主机名（uri_template/authority，留空同证书CN）" "$SERVER_CN")
     [[ -z "$SERVER_HOSTNAME" ]] && SERVER_HOSTNAME="$SERVER_CN"
+
+    echo ""
+    section "拥塞控制配置"
+    echo "  BBRv2 推荐用于运营商 QoS 场景（随机丢包 1~5%），吞吐量比 CUBIC 高 2~3 倍"
+    echo "  CUBIC 适合理想网络环境（无 QoS 干扰）"
+    echo ""
+    if prompt_yn "启用 BBRv2 拥塞控制？（推荐，对抗运营商 QoS）" "y"; then
+        CONGESTION_ALGO="bbr2"
+        info "已选择 BBRv2（loss_threshold=1.5%，自动忽略运营商随机丢包）"
+    else
+        CONGESTION_ALGO="cubic"
+        info "已选择 CUBIC（默认，适合无 QoS 干扰的环境）"
+    fi
 
     echo ""
     if prompt_yn "启用 certsrv 证书管理面板？（推荐）" "y"; then

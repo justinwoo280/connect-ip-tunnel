@@ -32,7 +32,10 @@
     "initial_stream_window": 524288,
     "max_stream_window": 6291456,
     "initial_conn_window": 1048576,
-    "max_conn_window": 15728640
+    "max_conn_window": 15728640,
+    "congestion": {
+      "algorithm": "bbr2"
+    }
   },
   "connect_ip": {
     "addr": "proxy.example.com:443",
