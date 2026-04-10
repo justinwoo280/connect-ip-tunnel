@@ -12,6 +12,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 	qhttp3 "github.com/quic-go/quic-go/http3"
+	"connect-ip-tunnel/congestion/bbr2"
+	congestion "github.com/quic-go/quic-go/congestion"
 )
 
 type ClientFactory interface {
@@ -89,6 +91,35 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 		}
 
 		// 握手成功
+		// 根据配置注入拥塞控制算法
+		if f.opts.Congestion.Algorithm == "bbr2" {
+			cfg := f.opts.Congestion.BBRv2
+			params := bbr2.DefaultParams()
+			if cfg.LossThreshold > 0 {
+				params.LossThreshold = cfg.LossThreshold
+			}
+			if cfg.Beta > 0 {
+				params.Beta = cfg.Beta
+			}
+			if cfg.StartupFullBwRounds > 0 {
+				params.StartupFullBwRounds = cfg.StartupFullBwRounds
+			}
+			if cfg.ProbeRTTPeriod.Duration > 0 {
+				params.ProbeRttPeriod = cfg.ProbeRTTPeriod.Duration
+			}
+			if cfg.ProbeRTTDuration.Duration > 0 {
+				params.ProbeRttDuration = cfg.ProbeRTTDuration.Duration
+			}
+			sender := bbr2.NewBBR2SenderWithParams(
+				bbr2.DefaultClock{},
+				congestion.InitialPacketSize,
+				0,
+				cfg.Aggressive,
+				params,
+			)
+			quicConn.SetCongestionControl(sender)
+		}
+
 		f.mu.Lock()
 		if f.transport == nil {
 			f.transport = &qhttp3.Transport{

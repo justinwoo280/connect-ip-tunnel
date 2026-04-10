@@ -153,6 +153,8 @@ type TLSConfig struct {
 }
 
 type HTTP3Config struct {
+	// Congestion 拥塞控制配置（留空使用默认 CUBIC）
+	Congestion CongestionConfig `json:"congestion,omitempty"`
 	EnableDatagrams      bool     `json:"enable_datagrams"`
 	MaxIdleTimeout       Duration `json:"max_idle_timeout"`
 	KeepAlivePeriod      Duration `json:"keep_alive_period"`
@@ -187,3 +189,31 @@ type ConnectIPConfig struct {
 }
 
 
+
+// CongestionConfig 拥塞控制配置
+type CongestionConfig struct {
+	// Algorithm 选择拥塞控制算法：cubic（默认）或 bbr2
+	Algorithm string `json:"algorithm,omitempty"`
+	// BBRv2 BBRv2 算法参数（仅 algorithm=bbr2 时生效）
+	BBRv2 BBRv2Config `json:"bbr2,omitempty"`
+}
+
+// BBRv2Config BBRv2 拥塞控制可调参数
+// 默认值已针对运营商 QoS 场景优化（1.5% 丢包阈值，beta=0.3）
+type BBRv2Config struct {
+	// LossThreshold 触发带宽下调的最低丢包率（默认 0.015 即 1.5%）
+	// 运营商随机丢包通常 < 1%，此阈值可避免因 QoS 丢包误判拥塞
+	LossThreshold float64 `json:"loss_threshold,omitempty"`
+	// Beta 丢包时带宽下调比例（默认 0.3，即保留 70% 带宽）
+	Beta float64 `json:"beta,omitempty"`
+	// StartupFullBwRounds 判定带宽已达瓶颈所需的连续轮数（默认 3）
+	StartupFullBwRounds int `json:"startup_full_bw_rounds,omitempty"`
+	// ProbeRTTPeriod 两次 ProbeRTT 之间的间隔（默认 10s）
+	ProbeRTTPeriod Duration `json:"probe_rtt_period,omitempty"`
+	// ProbeRTTDuration 每次 ProbeRTT 持续时间（默认 200ms）
+	ProbeRTTDuration Duration `json:"probe_rtt_duration,omitempty"`
+	// BwLoReduction 带宽下调策略：default / minrtt / inflight / cwnd
+	BwLoReduction string `json:"bw_lo_reduction,omitempty"`
+	// Aggressive 激进模式：初始窗口更大，适合高带宽低延迟线路（默认 false）
+	Aggressive bool `json:"aggressive,omitempty"`
+}
