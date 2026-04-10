@@ -4,6 +4,7 @@ package tun
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os/exec"
