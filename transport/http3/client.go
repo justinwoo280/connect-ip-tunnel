@@ -13,6 +13,7 @@ import (
 	"github.com/quic-go/quic-go"
 	qhttp3 "github.com/quic-go/quic-go/http3"
 	"connect-ip-tunnel/congestion/bbr2"
+	"connect-ip-tunnel/transport/obfs"
 	congestion "github.com/quic-go/quic-go/congestion"
 )
 
@@ -72,9 +73,30 @@ func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, 
 				_ = pc.Close()
 				return nil, fmt.Errorf("http3: resolve target addr %q: %w", target.Addr, err)
 			}
-			quicConn, dialErr = quic.Dial(ctx, pc, udpAddr, tlsCfg, quicCfg)
+			// 如果配置了 Salamander 混淆，包装 PacketConn
+			var dialConn net.PacketConn = pc
+			if f.opts.Obfs.Type == obfs.ObfsTypeSalamander && f.opts.Obfs.Password != "" {
+				dialConn = obfs.NewSalamanderConn(pc, f.opts.Obfs.Password)
+			}
+			quicConn, dialErr = quic.Dial(ctx, dialConn, udpAddr, tlsCfg, quicCfg)
 			if dialErr != nil {
 				_ = pc.Close()
+			}
+		} else if f.opts.Obfs.Type == obfs.ObfsTypeSalamander && f.opts.Obfs.Password != "" {
+			// Salamander 混淆：需要自己创建 PacketConn
+			udpNetwork := udpNetworkForAddr(target.Addr)
+			udpAddr, resolveErr := net.ResolveUDPAddr(udpNetwork, target.Addr)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("http3: resolve target addr %q: %w", target.Addr, resolveErr)
+			}
+			rawConn, listenErr := net.ListenPacket(udpNetwork, "")
+			if listenErr != nil {
+				return nil, fmt.Errorf("http3: listen packet for salamander: %w", listenErr)
+			}
+			salamanderConn := obfs.NewSalamanderConn(rawConn, f.opts.Obfs.Password)
+			quicConn, dialErr = quic.Dial(ctx, salamanderConn, udpAddr, tlsCfg, quicCfg)
+			if dialErr != nil {
+				_ = rawConn.Close()
 			}
 		} else {
 			quicConn, dialErr = quic.DialAddr(ctx, target.Addr, tlsCfg, quicCfg)

@@ -15,6 +15,7 @@ import (
 	securitytls "connect-ip-tunnel/security/tls"
 
 	"github.com/quic-go/quic-go"
+	"connect-ip-tunnel/transport/obfs"
 	qhttp3 "github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -205,7 +206,13 @@ func (s *Server) Start() error {
 			KeepAlivePeriod: s.cfg.HTTP3.KeepAlivePeriod.Duration,
 		}
 
-		listener, err := quic.Listen(udpConn, tlsServer.TLSConfig(), quicCfg)
+		// 如果配置了 Salamander 混淆，包装 UDP socket
+		var listenConn net.PacketConn = udpConn
+		if s.cfg.HTTP3.Obfs.Type == obfs.ObfsTypeSalamander && s.cfg.HTTP3.Obfs.Password != "" {
+			listenConn = obfs.NewSalamanderConn(udpConn, s.cfg.HTTP3.Obfs.Password)
+			log.Printf("[server] Salamander obfs enabled")
+		}
+		listener, err := quic.Listen(listenConn, tlsServer.TLSConfig(), quicCfg)
 		if err != nil {
 			startErr = fmt.Errorf("server: quic listen: %w", err)
 			return

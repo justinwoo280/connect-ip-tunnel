@@ -8,6 +8,8 @@ import (
 
 type Options struct {
 	EnableDatagrams bool
+	// Obfs UDP 包级别混淆配置
+	Obfs option.ObfsConfig
 
 	MaxIdleTimeout          time.Duration
 	KeepAlivePeriod         time.Duration

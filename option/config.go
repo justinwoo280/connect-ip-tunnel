@@ -153,6 +153,9 @@ type TLSConfig struct {
 }
 
 type HTTP3Config struct {
+	// Obfs UDP 包级别混淆配置（留空不启用）
+	// Salamander 混淆可规避运营商对 QUIC Long Header 的 DPI 识别
+	Obfs ObfsConfig `json:"obfs,omitempty"`
 	// Congestion 拥塞控制配置（留空使用默认 CUBIC）
 	Congestion CongestionConfig `json:"congestion,omitempty"`
 	EnableDatagrams      bool     `json:"enable_datagrams"`
@@ -189,6 +192,15 @@ type ConnectIPConfig struct {
 }
 
 
+
+// ObfsConfig UDP 包级别混淆配置
+type ObfsConfig struct {
+	// Type 混淆类型，目前支持 "salamander"
+	// 留空表示不启用混淆
+	Type string `json:"type,omitempty"`
+	// Password 预共享密钥（客户端和服务端必须相同）
+	Password string `json:"password,omitempty"`
+}
 
 // CongestionConfig 拥塞控制配置
 type CongestionConfig struct {
