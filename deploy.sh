@@ -40,6 +40,8 @@ SERVER_HOSTNAME=""                     # 客户端连接用的主机名（uri_te
 CERTSRV_PORT="8443"                   # certsrv 监听端口（留空则不启动）
 CERTSRV_ENABLED="true"
 CONGESTION_ALGO="bbr2"               # 拥塞控制算法：bbr2（推荐）或 cubic
+OBFS_TYPE=""                          # 混淆类型：salamander 或留空不启用
+OBFS_PASSWORD=""                      # 混淆密码
 
 # Docker 相关
 DOCKER_IMAGE="connect-ip-tunnel:local"
@@ -224,6 +226,16 @@ gen_server_config() {
       \"crl_interval\":        \"10m\""
     fi
 
+    # 构建 obfs 配置块（混淆）
+    local obfs_section=""
+    if [[ -n "$OBFS_TYPE" && "$OBFS_TYPE" == "salamander" ]]; then
+        obfs_section=",
+      \"obfs\": {
+        \"type\": \"${OBFS_TYPE}\",
+        \"password\": \"${OBFS_PASSWORD}\"
+      }"
+    fi
+
     # 构建 congestion 配置块
     local congestion_section=""
     if [[ "$CONGESTION_ALGO" == "bbr2" ]]; then
@@ -261,7 +273,7 @@ gen_server_config() {
       "initial_stream_window":   16777216,
       "max_stream_window":       67108864,
       "initial_conn_window":     33554432,
-      "max_conn_window":         134217728${congestion_section}
+      "max_conn_window":         134217728${obfs_section}${congestion_section}
     },
     "ipv4_pool":    "${IPV4_POOL}",
     "ipv6_pool":    "${IPV6_POOL}",
@@ -328,6 +340,22 @@ collect_config() {
     else
         CERTSRV_ENABLED="false"
         CERTSRV_PORT=""
+    fi
+
+    echo ""
+    section "Obfs（UDP 包级混淆）配置"
+    echo "  Salamander 混淆可规避运营商对 QUIC Long Header 的 DPI 识别"
+    echo ""
+    if prompt_yn "启用 Obfs 混淆？（可选，需客户端和服务端使用相同密码）" "n"; then
+        OBFS_TYPE="salamander"
+        OBFS_PASSWORD=$(prompt "混淆密码（自定义任意字符串，客户端需相同）" "")
+        if [[ -z "$OBFS_PASSWORD" ]]; then
+            warn "混淆密码为空，已禁用 Obfs"
+            OBFS_TYPE=""
+        fi
+    else
+        OBFS_TYPE=""
+        OBFS_PASSWORD=""
     fi
 }
 
@@ -582,6 +610,9 @@ print_summary() {
     echo -e "  ${BOLD}IPv4 池:${NC}    ${IPV4_POOL}"
     echo -e "  ${BOLD}IPv6 池:${NC}    ${IPV6_POOL}"
     echo -e "  ${BOLD}NAT:${NC}        ${ENABLE_NAT}"
+    if [[ -n "$OBFS_TYPE" ]]; then
+    echo -e "  ${BOLD}Obfs 混淆:${NC}    ${OBFS_TYPE} (Salamander)"
+    fi
     if [[ "$CERTSRV_ENABLED" == "true" && -n "$CERTSRV_PORT" ]]; then
     echo ""
     echo -e "  ${BOLD}${CYAN}CertSrv 证书管理面板:${NC}"
