@@ -143,8 +143,6 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 		}
 		ip := prefix.Addr().Unmap().String()
 		mask := prefixToMask(prefix)
-		gw := deriveGatewayV4(prefix)
-
 		if err := run("netsh", "interface", "ip", "set", "address", "name="+ifName, "static", ip, mask); err != nil {
 			return fmt.Errorf("set ipv4 address: %w", err)
 		}
@@ -154,11 +152,27 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 		if err := run("netsh", "interface", "ipv4", "set", "interface", ifName, "metric=1"); err != nil {
 			return fmt.Errorf("set ipv4 metric: %w", err)
 		}
-		if err := run("netsh", "interface", "ipv4", "add", "route", "0.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("add ipv4 route 0.0.0.0/1: %w", err)
-		}
-		if err := run("netsh", "interface", "ipv4", "add", "route", "128.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("add ipv4 route 128.0.0.0/1: %w", err)
+
+		// 添加 split-default 路由（0.0.0.0/1 + 128.0.0.0/1 = 全部 IPv4，优先级高于 0.0.0.0/0）
+		// WinTUN 是 L3 点对点设备，无 ARP 解析。
+		// /32 时 nexthop=自身 IP 在部分 Windows 版本上不可达，
+		// 省略 nexthop 让 netsh 创建 on-link 路由（直接绑定到接口），TUN 设备天然支持。
+		if prefix.Bits() == 32 {
+			// on-link 路由：不指定 nexthop，流量直接发往 TUN 接口
+			if err := run("netsh", "interface", "ipv4", "add", "route", "0.0.0.0/1", ifName, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv4 route 0.0.0.0/1: %w", err)
+			}
+			if err := run("netsh", "interface", "ipv4", "add", "route", "128.0.0.0/1", ifName, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv4 route 128.0.0.0/1: %w", err)
+			}
+		} else {
+			gw := deriveGatewayV4(prefix)
+			if err := run("netsh", "interface", "ipv4", "add", "route", "0.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv4 route 0.0.0.0/1: %w", err)
+			}
+			if err := run("netsh", "interface", "ipv4", "add", "route", "128.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv4 route 128.0.0.0/1: %w", err)
+			}
 		}
 	}
 
@@ -177,19 +191,29 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 		if err != nil {
 			return fmt.Errorf("parse ipv6 cidr: %w", err)
 		}
-		gw6 := deriveGatewayV6(prefix)
-
 		if err := run("netsh", "interface", "ipv6", "set", "address", ifName, prefix.Addr().String()); err != nil {
 			return fmt.Errorf("set ipv6 address: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv6", "set", "interface", ifName, "metric=1"); err != nil {
 			return fmt.Errorf("set ipv6 metric: %w", err)
 		}
-		if err := run("netsh", "interface", "ipv6", "add", "route", "::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("add ipv6 route ::/1: %w", err)
-		}
-		if err := run("netsh", "interface", "ipv6", "add", "route", "8000::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("add ipv6 route 8000::/1: %w", err)
+
+		// 同 IPv4：/128 时使用 on-link 路由
+		if prefix.Bits() == 128 {
+			if err := run("netsh", "interface", "ipv6", "add", "route", "::/1", ifName, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv6 route ::/1: %w", err)
+			}
+			if err := run("netsh", "interface", "ipv6", "add", "route", "8000::/1", ifName, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv6 route 8000::/1: %w", err)
+			}
+		} else {
+			gw6 := deriveGatewayV6(prefix)
+			if err := run("netsh", "interface", "ipv6", "add", "route", "::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv6 route ::/1: %w", err)
+			}
+			if err := run("netsh", "interface", "ipv6", "add", "route", "8000::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
+				return fmt.Errorf("add ipv6 route 8000::/1: %w", err)
+			}
 		}
 	}
 
