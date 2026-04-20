@@ -343,10 +343,43 @@ func (rm *RoutingManager) enableIPForwarding() error {
 	}
 }
 
-// setupNAT 配置 NAT（SNAT/MASQUERADE）
+// setupNAT 配置 NAT（SNAT/MASQUERADE）和 FORWARD 规则
 func (rm *RoutingManager) setupNAT(outInterface string) error {
 	switch runtime.GOOS {
 	case "linux":
+		// 1. 添加 FORWARD 规则：允许 TUN → 出口 和 出口 → TUN（ESTABLISHED,RELATED）的双向转发。
+		// 许多 VPS 默认 iptables -P FORWARD DROP，不加这些规则流量会被静默丢弃。
+		// 使用 -I（Insert 到链首）确保优先于可能存在的 DROP 规则。
+
+		// TUN → outbound：允许来自客户端池的出站流量
+		cmd := exec.Command("iptables", "-I", "FORWARD",
+			"-i", rm.tunIfName, "-o", outInterface, "-j", "ACCEPT")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: iptables forward out: %v (output: %s)", err, string(out))
+		}
+
+		// outbound → TUN：允许已建立连接的回程流量
+		cmd = exec.Command("iptables", "-I", "FORWARD",
+			"-i", outInterface, "-o", rm.tunIfName,
+			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: iptables forward in: %v (output: %s)", err, string(out))
+		}
+
+		// IPv6 FORWARD 规则
+		cmd = exec.Command("ip6tables", "-I", "FORWARD",
+			"-i", rm.tunIfName, "-o", outInterface, "-j", "ACCEPT")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: ip6tables forward out: %v (output: %s)", err, string(out))
+		}
+		cmd = exec.Command("ip6tables", "-I", "FORWARD",
+			"-i", outInterface, "-o", rm.tunIfName,
+			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: ip6tables forward in: %v (output: %s)", err, string(out))
+		}
+
+		// 2. NAT MASQUERADE
 		// iptables -t nat -A POSTROUTING -s <client_pool> -o <out_if> -j MASQUERADE
 		for _, pool := range rm.clientPool {
 			if pool.Addr().Is4() {
@@ -380,10 +413,27 @@ func (rm *RoutingManager) setupNAT(outInterface string) error {
 	}
 }
 
-// cleanupNAT 清理 NAT 规则
+// cleanupNAT 清理 NAT 和 FORWARD 规则
 func (rm *RoutingManager) cleanupNAT(outInterface string) error {
 	switch runtime.GOOS {
 	case "linux":
+		// 清理 FORWARD 规则
+		cmd := exec.Command("iptables", "-D", "FORWARD",
+			"-i", rm.tunIfName, "-o", outInterface, "-j", "ACCEPT")
+		_ = cmd.Run()
+		cmd = exec.Command("iptables", "-D", "FORWARD",
+			"-i", outInterface, "-o", rm.tunIfName,
+			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		_ = cmd.Run()
+		cmd = exec.Command("ip6tables", "-D", "FORWARD",
+			"-i", rm.tunIfName, "-o", outInterface, "-j", "ACCEPT")
+		_ = cmd.Run()
+		cmd = exec.Command("ip6tables", "-D", "FORWARD",
+			"-i", outInterface, "-o", rm.tunIfName,
+			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		_ = cmd.Run()
+
+		// 清理 MASQUERADE 规则
 		for _, pool := range rm.clientPool {
 			if pool.Addr().Is4() {
 				cmd := exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
