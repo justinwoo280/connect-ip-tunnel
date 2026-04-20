@@ -15,7 +15,7 @@
       "server_name": "proxy.example.com",
       "insecure_skip_verify": false,
       "client_cert_file": "/etc/connect-ip-tunnel/certs/client.crt",
-      "client_key_file":  "/etc/connect-ip-tunnel/certs/client.key",
+      "client_key_file": "/etc/connect-ip-tunnel/certs/client.key",
       "enable_pqc": true,
       "use_system_cas": false,
       "use_mozilla_ca": false,
@@ -26,28 +26,32 @@
       "session_cache_size": 128
     },
     "http3": {
-      "enable_datagrams":       true,
-      "max_idle_timeout":       "30s",
-      "keep_alive_period":      "10s",
-      "allow_0rtt":             false,
+      "enable_datagrams": true,
+      "max_idle_timeout": "30s",
+      "keep_alive_period": "10s",
+      "allow_0rtt": false,
       "disable_path_mtu_probe": false,
-      "initial_stream_window":  16777216,
-      "max_stream_window":      67108864,
-      "initial_conn_window":    33554432,
-      "max_conn_window":        134217728,
+      "initial_stream_window": 16777216,
+      "max_stream_window": 67108864,
+      "initial_conn_window": 33554432,
+      "max_conn_window": 134217728,
+      "obfs": {
+        "type": "salamander",
+        "password": "your-shared-secret"
+      },
       "congestion": {
         "algorithm": "bbr2"
       }
     },
     "connect_ip": {
-      "addr":                    "proxy.example.com:443",
-      "uri":                     "/.well-known/masque/ip",
-      "authority":               "proxy.example.com",
+      "addr": "proxy.example.com:443",
+      "uri": "/.well-known/masque/ip",
+      "authority": "proxy.example.com",
       "wait_for_address_assign": true,
-      "address_assign_timeout":  "30s",
-      "enable_reconnect":        true,
-      "max_reconnect_delay":     "30s",
-      "num_sessions":            4
+      "address_assign_timeout": "30s",
+      "enable_reconnect": true,
+      "max_reconnect_delay": "30s",
+      "num_sessions": 4
     }
   }
 }

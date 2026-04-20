@@ -9,38 +9,42 @@
       "mtu": 1400
     },
     "tls": {
-      "cert_file":           "/etc/connect-ip-tunnel/certs/server.crt",
-      "key_file":            "/etc/connect-ip-tunnel/certs/server.key",
-      "enable_mtls":         true,
-      "client_ca_file":      "/etc/connect-ip-tunnel/certs/ca.crt",
-      "enable_pqc":          true,
+      "cert_file": "/etc/connect-ip-tunnel/certs/server.crt",
+      "key_file": "/etc/connect-ip-tunnel/certs/server.key",
+      "enable_mtls": true,
+      "client_ca_file": "/etc/connect-ip-tunnel/certs/ca.crt",
+      "enable_pqc": true,
       "enable_session_cache": true,
-      "session_cache_size":  256,
-      "crl_url":             "https://127.0.0.1:8443/crl.pem",
-      "crl_interval":        "10m"
+      "session_cache_size": 256,
+      "crl_url": "https://127.0.0.1:8443/crl.pem",
+      "crl_interval": "10m"
     },
     "http3": {
-      "enable_datagrams":        true,
-      "max_idle_timeout":        "60s",
-      "keep_alive_period":       "20s",
-      "disable_path_mtu_probe":  false,
-      "initial_stream_window":   16777216,
-      "max_stream_window":       67108864,
-      "initial_conn_window":     33554432,
-      "max_conn_window":         134217728,
+      "enable_datagrams": true,
+      "max_idle_timeout": "60s",
+      "keep_alive_period": "20s",
+      "disable_path_mtu_probe": false,
+      "initial_stream_window": 16777216,
+      "max_stream_window": 67108864,
+      "initial_conn_window": 33554432,
+      "max_conn_window": 134217728,
+      "obfs": {
+        "type": "salamander",
+        "password": "your-shared-secret"
+      },
       "congestion": {
         "algorithm": "bbr2"
       }
     },
-    "ipv4_pool":    "10.233.0.0/16",
-    "ipv6_pool":    "fd00::/64",
-    "enable_nat":   true,
+    "ipv4_pool": "10.233.0.0/16",
+    "ipv6_pool": "fd00::/64",
+    "enable_nat": true,
     "nat_interface": "",
     "certsrv": {
-      "listen":       ":8443",
-      "db_path":      "/etc/connect-ip-tunnel/certsrv.db",
+      "listen": ":8443",
+      "db_path": "/etc/connect-ip-tunnel/certsrv.db",
       "ca_cert_file": "/etc/connect-ip-tunnel/certs/ca.crt",
-      "ca_key_file":  "/etc/connect-ip-tunnel/certs/ca.key"
+      "ca_key_file": "/etc/connect-ip-tunnel/certs/ca.key"
     }
   }
 }

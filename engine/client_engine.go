@@ -128,6 +128,8 @@ func (e *Engine) Start() error {
 		// 5. 构建 HTTP/3 工厂（复用已构建的 tlsClient，避免重复加载证书）
 		h3Opts := h3transport.Options{
 			EnableDatagrams:                e.cfg.HTTP3.EnableDatagrams,
+			Obfs:                           e.cfg.HTTP3.Obfs,
+			Congestion:                     e.cfg.HTTP3.Congestion,
 			MaxIdleTimeout:                 e.cfg.HTTP3.MaxIdleTimeout.Duration,
 			KeepAlivePeriod:                e.cfg.HTTP3.KeepAlivePeriod.Duration,
 			Allow0RTT:                      e.cfg.HTTP3.Allow0RTT,
