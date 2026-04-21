@@ -84,6 +84,26 @@ command_exists() {
     command -v "$1" &>/dev/null
 }
 
+# 检测服务器是否有 IPv6 互联网连通性
+detect_ipv6() {
+    # 1. 检查是否有 global scope 的 IPv6 地址
+    if ! ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+        return 1
+    fi
+    # 2. 检查是否有 IPv6 默认路由
+    if ! ip -6 route show default 2>/dev/null | grep -q 'default'; then
+        return 1
+    fi
+    # 3. 尝试连通性测试（快速超时）
+    if command_exists curl; then
+        curl -6 -sf --max-time 3 https://ipv6.google.com/ &>/dev/null && return 0
+    elif command_exists wget; then
+        wget -6 -q --timeout=3 -O /dev/null https://ipv6.google.com/ 2>/dev/null && return 0
+    fi
+    # 有地址和路由但连通性测试失败，保守起见仍认为有 IPv6
+    return 0
+}
+
 prompt() {
     # prompt "提示" "默认值" -> 返回用户输入或默认值
     # 注意：提示符输出到 stderr，避免被 $() 捕获时混入返回值
@@ -295,7 +315,16 @@ collect_config() {
     SERVER_PORT=$(prompt "监听端口 (UDP)" "$SERVER_PORT")
     ADMIN_PORT=$(prompt "管理/Metrics 端口 (TCP)" "$ADMIN_PORT")
     IPV4_POOL=$(prompt "IPv4 地址池 (CIDR)" "$IPV4_POOL")
-    IPV6_POOL=$(prompt "IPv6 地址池 (CIDR)" "$IPV6_POOL")
+
+    # 自动检测 IPv6 可用性
+    if detect_ipv6; then
+        info "检测到服务器有 IPv6 互联网连通性 ✓"
+        IPV6_POOL=$(prompt "IPv6 地址池 (CIDR)" "$IPV6_POOL")
+    else
+        warn "未检测到 IPv6 互联网连通性，跳过 IPv6 配置"
+        warn "客户端将仅使用 IPv4（双栈网站通过 IPv4 访问）"
+        IPV6_POOL=""
+    fi
     TUN_MTU=$(prompt "TUN MTU" "$TUN_MTU")
 
     echo ""
@@ -419,17 +448,21 @@ deploy_docker() {
         docker rm "$CONTAINER_NAME" 2>/dev/null || true
     fi
 
+    # 使用 --net=host：容器直接使用宿主机网络栈
+    # 优势：
+    #   1. IPv4 + IPv6 双栈直接可用（无需 Docker bridge IPv6 配置）
+    #   2. iptables/ip6tables 规则直接作用于宿主机（NAT/FORWARD/MSS Clamping）
+    #   3. 无端口映射开销，QUIC UDP 性能更好
+    #   4. TUN 设备在宿主机命名空间，行为与 systemd 裸机部署一致
     docker run -d \
         --name "$CONTAINER_NAME" \
         --restart unless-stopped \
+        --net=host \
         --cap-add NET_ADMIN \
         --cap-add SYS_MODULE \
         --device /dev/net/tun \
         --sysctl net.ipv4.ip_forward=1 \
         --sysctl net.ipv6.conf.all.forwarding=1 \
-        -p "${SERVER_PORT}:${SERVER_PORT}/udp" \
-        -p "${ADMIN_PORT}:${ADMIN_PORT}/tcp" \
-        -p "${CERTSRV_PORT}:${CERTSRV_PORT}/tcp" \
         -v "$DOCKER_CONFIG_DIR:/etc/connect-ip-tunnel:ro" \
         -v "$DOCKER_DATA_DIR:/var/lib/connect-ip-tunnel" \
         "$DOCKER_IMAGE" \
