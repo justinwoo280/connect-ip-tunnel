@@ -194,6 +194,20 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 		if err := run("netsh", "interface", "ipv6", "set", "address", ifName, prefix.Addr().String()); err != nil {
 			return fmt.Errorf("set ipv6 address: %w", err)
 		}
+
+		// TUN 是 L3 点对点设备，不需要 NDP（Neighbor Discovery Protocol）。
+		// 不抑制的话 Windows 会：
+		//   1. 发 DAD 包（源地址 ::）→ 服务端拒绝
+		//   2. 发 Router Solicitation（源地址 fe80::）→ 服务端拒绝
+		//   3. 导致 RFC 6724 源地址选择可能选 fe80:: 而非分配的 ULA 地址
+		// dadtransmits=0：跳过 DAD（消除 :: 源地址包）
+		// routerdiscovery=disabled：禁用 RS（消除 fe80:: 源地址包）
+		if err := run("netsh", "interface", "ipv6", "set", "interface", ifName,
+			"dadtransmits=0", "routerdiscovery=disabled"); err != nil {
+			// 非致命：即使失败，IPv6 路由仍可工作，只是会有 NDP 噪音
+			log.Printf("[tun] warning: suppress ipv6 ndp: %v", err)
+		}
+
 		if err := run("netsh", "interface", "ipv6", "set", "interface", ifName, "metric=1"); err != nil {
 			return fmt.Errorf("set ipv6 metric: %w", err)
 		}

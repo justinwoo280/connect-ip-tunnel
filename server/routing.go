@@ -379,6 +379,43 @@ func (rm *RoutingManager) setupNAT(outInterface string) error {
 			log.Printf("[routing] warning: ip6tables forward in: %v (output: %s)", err, string(out))
 		}
 
+		// 3. TCP MSS Clamping：防止隧道内 MTU 黑洞
+		//
+		// TUN MTU=1400 → TCP 协商 MSS=1360 → IP 包=1400 字节。
+		// 但 QUIC datagram 还需叠加：QUIC Short Header(~20B) + HTTP/3 Datagram Frame(~5B)
+		// + Salamander Salt(8B) + UDP/IP 外层(28B) ≈ 61B 额外开销。
+		// 若 QUIC 路径 MTU=1450，可用 datagram 载荷=1389 < 1400 → 大 IP 包被静默丢弃。
+		//
+		// 表现：HTTP（小响应）正常，HTTPS（TLS 握手 3000-4000B 拆成多个大段）超时。
+		//
+		// 修复：在 FORWARD 链 mangle 表上钳制 SYN 包的 MSS 为 1200，
+		// 确保后续 TCP 段 ≤ 1200B → IP包 ≤ 1240B → 适配任何合理的 QUIC 路径 MTU。
+		cmd = exec.Command("iptables", "-t", "mangle", "-A", "FORWARD",
+			"-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--set-mss", "1200")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: iptables mss clamp (out): %v (output: %s)", err, string(out))
+		}
+		cmd = exec.Command("iptables", "-t", "mangle", "-A", "FORWARD",
+			"-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--set-mss", "1200")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: iptables mss clamp (in): %v (output: %s)", err, string(out))
+		}
+		// IPv6 MSS clamp
+		cmd = exec.Command("ip6tables", "-t", "mangle", "-A", "FORWARD",
+			"-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--set-mss", "1200")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: ip6tables mss clamp: %v (output: %s)", err, string(out))
+		}
+		cmd = exec.Command("ip6tables", "-t", "mangle", "-A", "FORWARD",
+			"-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--set-mss", "1200")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[routing] warning: ip6tables mss clamp: %v (output: %s)", err, string(out))
+		}
+
 		// 2. NAT MASQUERADE
 		// iptables -t nat -A POSTROUTING -s <client_pool> -o <out_if> -j MASQUERADE
 		for _, pool := range rm.clientPool {
@@ -433,7 +470,15 @@ func (rm *RoutingManager) cleanupNAT(outInterface string) error {
 			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 		_ = cmd.Run()
 
-		// 清理 MASQUERADE 规则
+		// 清理 MSS Clamping 规则（mangle 表）
+		for _, args := range [][]string{
+			{"iptables", "-t", "mangle", "-D", "FORWARD", "-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
+			{"iptables", "-t", "mangle", "-D", "FORWARD", "-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
+			{"ip6tables", "-t", "mangle", "-D", "FORWARD", "-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
+			{"ip6tables", "-t", "mangle", "-D", "FORWARD", "-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
+		} {
+			_ = exec.Command(args[0], args[1:]...).Run()
+		}
 		for _, pool := range rm.clientPool {
 			if pool.Addr().Is4() {
 				cmd := exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
