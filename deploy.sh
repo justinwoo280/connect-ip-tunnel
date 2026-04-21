@@ -461,8 +461,6 @@ deploy_docker() {
         --cap-add NET_ADMIN \
         --cap-add SYS_MODULE \
         --device /dev/net/tun \
-        --sysctl net.ipv4.ip_forward=1 \
-        --sysctl net.ipv6.conf.all.forwarding=1 \
         -v "$DOCKER_CONFIG_DIR:/etc/connect-ip-tunnel:ro" \
         -v "$DOCKER_DATA_DIR:/var/lib/connect-ip-tunnel" \
         "$DOCKER_IMAGE" \
