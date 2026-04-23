@@ -3,9 +3,11 @@ package http3
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	bypass "connect-ip-tunnel/platform/bypass"
 	securitytls "connect-ip-tunnel/security/tls"
@@ -13,7 +15,6 @@ import (
 	"github.com/quic-go/quic-go"
 	qhttp3 "github.com/quic-go/quic-go/http3"
 	"connect-ip-tunnel/congestion/bbr2"
-	"connect-ip-tunnel/transport/obfs"
 	congestion "github.com/quic-go/quic-go/congestion"
 )
 
@@ -26,6 +27,7 @@ type Factory struct {
 	opts      Options
 	tlsClient securitytls.ClientConfig
 	bypass    bypass.Dialer
+	pool      *transportPool
 
 	mu        sync.Mutex
 	transport *qhttp3.Transport
@@ -36,70 +38,102 @@ func NewFactory(opts Options, tlsClient securitytls.ClientConfig, bp bypass.Dial
 		opts:      opts,
 		tlsClient: tlsClient,
 		bypass:    bp,
+		pool:      newTransportPool(opts),
 	}
 }
 
 // Dial 建立到 target 的 QUIC 连接并返回 HTTP/3 ClientConn。
 // 若配置了 bypass dialer，使用它建 UDP socket 以绕过 TUN；否则直接 DialAddr。
 //
+// 域名解析与连接策略（Happy Eyeballs / RFC 8305 简化版）：
+//   - 当 target.Addr 是字面量 IP 时，直接用对应地址族 dial。
+//   - 当 target.Addr 是域名时，根据 opts.PreferAddressFamily 解析：
+//       * "v4" / "v6"：仅尝试对应地址族；
+//       * "auto"（默认）：解析所有 A/AAAA，IPv6 优先发起 dial，
+//         若 HappyEyeballsDelay 内未成功则并行尝试 IPv4，先成功者赢。
+//   - 任一地址族成功后立即取消另一族的尝试。
+//
 // ECH HRR 处理：若服务端拒绝 ECH 并返回 RetryConfigList，Dial 会在同一次调用内
 // 使用新配置重试（最多由 ClientConfig.HandleHandshakeError 控制次数）。
 // 超过重试上限或无法获取重试配置时，返回错误，不降级为明文 ClientHello。
-func (f *Factory) Dial(ctx context.Context, target Target) (*qhttp3.ClientConn, error) {
+func (f *Factory) Dial(ctx context.Context, tgt Target) (*qhttp3.ClientConn, error) {
 	quicCfg := buildQUICConfig(f.opts)
 
+	// 1. 解析目标，得到候选 target 列表（按偏好排序）。
+	prefer := f.opts.PreferAddressFamily
+	if prefer == "" {
+		prefer = "auto"
+	}
+	targets, err := resolveTargets(ctx, tgt.Addr, prefer)
+	if err != nil {
+		return nil, fmt.Errorf("http3: resolve %q: %w", tgt.Addr, err)
+	}
+
+	// 2. ECH retry loop（每次重试都使用最新 tlsClient 配置）。
 	for {
-		// 每次尝试都从 tlsClient 取最新配置（HandleHandshakeError 会原地更新）
 		tlsCfg := f.tlsClient.TLSConfig().Clone()
-		if target.ServerName != "" {
-			tlsCfg.ServerName = target.ServerName
+		if tgt.ServerName != "" {
+			tlsCfg.ServerName = tgt.ServerName
+		}
+
+		// dialOne 在指定 target 上发起 QUIC 握手。
+		//
+		// 0-RTT-first 策略（spec H6 / Phase 5）：
+		//   - 当 opts.Allow0RTT == true 时，优先调 tr.DialEarly()。quic-go 内部会
+		//     根据 tlsCfg.ClientSessionCache 中是否有可复用的 ticket 决定走 0-RTT 还是
+		//     回退到 1-RTT 全握手。两条路径都返回 *quic.Conn，调用方无需做手工 fallback。
+		//   - Used0RTT 真值表示 early data 被接受，可在握手未完成时就发出应用层数据；
+		//     若服务端拒绝 0-RTT（重放保护 / ticket 过期），quic-go 自动降级到 1-RTT。
+		//   - opts.Allow0RTT == false → 走传统 tr.Dial，行为与之前完全一致。
+		dialOne := func(dctx context.Context, t target) (interface{}, error) {
+			tr, gerr := f.pool.Get(dctx, t.network, "", f.bypass)
+			if gerr != nil {
+				return nil, fmt.Errorf("http3: get transport (%s): %w", t.network, gerr)
+			}
+			if f.opts.Allow0RTT {
+				conn, derr := tr.DialEarly(dctx, t.addr, tlsCfg, quicCfg)
+				if derr != nil {
+					return nil, derr
+				}
+				if conn.ConnectionState().Used0RTT {
+					log.Printf("[http3] 0-RTT accepted on %s/%s", t.network, t.addr)
+				} else {
+					log.Printf("[http3] 0-RTT not used (no ticket / rejected) on %s/%s, fallback 1-RTT ok", t.network, t.addr)
+				}
+				return conn, nil
+			}
+			conn, derr := tr.Dial(dctx, t.addr, tlsCfg, quicCfg)
+			if derr != nil {
+				return nil, derr
+			}
+			return conn, nil
 		}
 
 		var quicConn *quic.Conn
 		var dialErr error
-
-		if f.bypass != nil {
-			// 根据目标地址类型选择 udp4 或 udp6，确保创建的是单栈 socket。
-			// Windows 上 "udp" 会产生双栈 IPv6 socket（本地地址为 [::]），
-			// 此时 IP_UNICAST_IF（IPPROTO_IP）对该 socket 无效，bypass 绑定不生效；
-			// 显式使用 udp4/udp6 可保证 setsockopt 作用于正确协议族的 socket。
-			udpNetwork := udpNetworkForAddr(target.Addr)
-			pc, err := f.bypass.ListenPacket(ctx, udpNetwork, "")
+		if len(targets) == 1 {
+			// 单 target 快路径：直接 dial，避免 happy eyeballs 调度开销。
+			c, err := dialOne(ctx, targets[0])
 			if err != nil {
-				return nil, fmt.Errorf("http3: bypass listen packet: %w", err)
-			}
-			udpAddr, err := net.ResolveUDPAddr(udpNetwork, target.Addr)
-			if err != nil {
-				_ = pc.Close()
-				return nil, fmt.Errorf("http3: resolve target addr %q: %w", target.Addr, err)
-			}
-			// 如果配置了 Salamander 混淆，包装 PacketConn
-			var dialConn net.PacketConn = pc
-			if f.opts.Obfs.Type == obfs.ObfsTypeSalamander && f.opts.Obfs.Password != "" {
-				dialConn = obfs.NewSalamanderConn(pc, f.opts.Obfs.Password)
-			}
-			quicConn, dialErr = quic.Dial(ctx, dialConn, udpAddr, tlsCfg, quicCfg)
-			if dialErr != nil {
-				_ = pc.Close()
-			}
-		} else if f.opts.Obfs.Type == obfs.ObfsTypeSalamander && f.opts.Obfs.Password != "" {
-			// Salamander 混淆：需要自己创建 PacketConn
-			udpNetwork := udpNetworkForAddr(target.Addr)
-			udpAddr, resolveErr := net.ResolveUDPAddr(udpNetwork, target.Addr)
-			if resolveErr != nil {
-				return nil, fmt.Errorf("http3: resolve target addr %q: %w", target.Addr, resolveErr)
-			}
-			rawConn, listenErr := net.ListenPacket(udpNetwork, "")
-			if listenErr != nil {
-				return nil, fmt.Errorf("http3: listen packet for salamander: %w", listenErr)
-			}
-			salamanderConn := obfs.NewSalamanderConn(rawConn, f.opts.Obfs.Password)
-			quicConn, dialErr = quic.Dial(ctx, salamanderConn, udpAddr, tlsCfg, quicCfg)
-			if dialErr != nil {
-				_ = rawConn.Close()
+				dialErr = err
+			} else {
+				quicConn = c.(*quic.Conn)
+				log.Printf("[http3] connected via %s to %s", targets[0].network, targets[0].addr)
 			}
 		} else {
-			quicConn, dialErr = quic.DialAddr(ctx, target.Addr, tlsCfg, quicCfg)
+			delay := f.opts.HappyEyeballsDelay
+			if delay <= 0 {
+				delay = 50 * time.Millisecond
+			}
+			c, err := happyEyeballsDial(ctx, targets, delay, dialOne)
+			if err != nil {
+				dialErr = err
+			} else {
+				quicConn = c.(*quic.Conn)
+				if ra := quicConn.RemoteAddr(); ra != nil {
+					log.Printf("[http3] connected via happy-eyeballs to %s", ra.String())
+				}
+			}
 		}
 
 		if dialErr != nil {
@@ -178,9 +212,21 @@ func (f *Factory) Close() error {
 	t := f.transport
 	f.transport = nil
 	f.mu.Unlock()
+	
+	var firstErr error
 	if t != nil {
-		return t.Close()
+		if err := t.Close(); err != nil {
+			firstErr = err
+		}
 	}
-	return nil
+	
+	// Close the transport pool
+	if f.pool != nil {
+		if err := f.pool.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	
+	return firstErr
 }
 

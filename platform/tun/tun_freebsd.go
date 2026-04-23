@@ -172,6 +172,11 @@ func (c *freebsdConfigurator) Teardown(ifName string) error {
 	return nil
 }
 
+// UpdateAddress 在 FreeBSD 上走通用 "重新 setup" 兜底路径。
+func (c *freebsdConfigurator) UpdateAddress(prev, next NetworkConfig) error {
+	return updateAddressByReSetup(c, prev, next)
+}
+
 func configureFreeBSDDNS(ifName, dns, ipv6DNS string) error {
 	var lines []string
 	if dns != "" {

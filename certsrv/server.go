@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"connect-ip-tunnel/common/safe"
 )
 
 // Config 是 certsrv 的配置
@@ -63,14 +65,16 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	s := &Server{cfg: cfg, auth: auth, ca: ca, db: db, keys: newKeyStore(), log: log}
 	s.http = &http.Server{
 		Addr:         cfg.Listen,
-		Handler:      s.routes(),
+		Handler:      safe.HTTP("certsrv", s.routes()),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
 	// 启动审计日志轮转后台任务（每天凌晨 2:00 UTC 执行）
-	go s.auditRotateLoop()
+	safe.Go("certsrv.audit_rotate", func() {
+		s.auditRotateLoop()
+	})
 
 	return s, nil
 }

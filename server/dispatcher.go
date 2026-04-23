@@ -5,23 +5,30 @@ import (
 	"log"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"connect-ip-tunnel/common/bufferpool"
+	"connect-ip-tunnel/observability"
 	"connect-ip-tunnel/platform/tun"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
 
+// indexes 是不可变的索引快照，用于无锁查找。
+type indexes struct {
+	ipv4 map[netip.Addr]*dispatchEntry
+	ipv6 map[netip.Addr]*dispatchEntry
+}
+
 // PacketDispatcher 从 TUN 设备读取 IP 包，根据目的地址分发到正确的 session。
 // 解决多会话共享 TUN 时的包路由问题。
 type PacketDispatcher struct {
 	dev tun.Device
 
-	mu        sync.RWMutex
-	sessions  map[string]*dispatchEntry // sessionID -> entry
-	ipv4Index map[netip.Addr]*dispatchEntry
-	ipv6Index map[netip.Addr]*dispatchEntry
+	mu       sync.Mutex                 // 仅保护写操作（注册/注销）
+	sessions map[string]*dispatchEntry  // sessionID -> entry
+	idx      atomic.Pointer[indexes]    // 无锁读取的索引快照
 }
 
 type dispatchEntry struct {
@@ -32,12 +39,69 @@ type dispatchEntry struct {
 
 // NewPacketDispatcher 创建包分发器。
 func NewPacketDispatcher(dev tun.Device) *PacketDispatcher {
-	return &PacketDispatcher{
-		dev:       dev,
-		sessions:  make(map[string]*dispatchEntry),
-		ipv4Index: make(map[netip.Addr]*dispatchEntry),
-		ipv6Index: make(map[netip.Addr]*dispatchEntry),
+	d := &PacketDispatcher{
+		dev:      dev,
+		sessions: make(map[string]*dispatchEntry),
 	}
+	// 初始化空索引
+	d.idx.Store(&indexes{
+		ipv4: make(map[netip.Addr]*dispatchEntry),
+		ipv6: make(map[netip.Addr]*dispatchEntry),
+	})
+	return d
+}
+
+// cloneAndAdd 克隆当前索引并添加新 entry。
+func (d *PacketDispatcher) cloneAndAdd(entry *dispatchEntry) *indexes {
+	old := d.idx.Load()
+	newIdx := &indexes{
+		ipv4: make(map[netip.Addr]*dispatchEntry, len(old.ipv4)+1),
+		ipv6: make(map[netip.Addr]*dispatchEntry, len(old.ipv6)+1),
+	}
+	
+	// 复制旧索引
+	for k, v := range old.ipv4 {
+		newIdx.ipv4[k] = v
+	}
+	for k, v := range old.ipv6 {
+		newIdx.ipv6[k] = v
+	}
+	
+	// 添加新 entry
+	if addr, ok := hostRouteAddr(entry.ipv4Prefix); ok {
+		newIdx.ipv4[addr] = entry
+	}
+	if addr, ok := hostRouteAddr(entry.ipv6Prefix); ok {
+		newIdx.ipv6[addr] = entry
+	}
+	
+	return newIdx
+}
+
+// cloneAndRemove 克隆当前索引并移除指定 entry。
+func (d *PacketDispatcher) cloneAndRemove(entry *dispatchEntry) *indexes {
+	old := d.idx.Load()
+	newIdx := &indexes{
+		ipv4: make(map[netip.Addr]*dispatchEntry, len(old.ipv4)),
+		ipv6: make(map[netip.Addr]*dispatchEntry, len(old.ipv6)),
+	}
+	
+	// 复制旧索引，跳过要删除的 entry
+	ipv4Addr, hasIPv4 := hostRouteAddr(entry.ipv4Prefix)
+	ipv6Addr, hasIPv6 := hostRouteAddr(entry.ipv6Prefix)
+	
+	for k, v := range old.ipv4 {
+		if !(hasIPv4 && k == ipv4Addr && v == entry) {
+			newIdx.ipv4[k] = v
+		}
+	}
+	for k, v := range old.ipv6 {
+		if !(hasIPv6 && k == ipv6Addr && v == entry) {
+			newIdx.ipv6[k] = v
+		}
+	}
+	
+	return newIdx
 }
 
 // RegisterSession 注册一个 session，指定其分配的 IP 前缀。
@@ -51,11 +115,13 @@ func (d *PacketDispatcher) RegisterSession(sessionID string, ipv4Prefix, ipv6Pre
 
 	d.mu.Lock()
 	if old, ok := d.sessions[sessionID]; ok {
-		d.unindexEntry(old)
+		// 移除旧 entry 的索引
+		d.idx.Store(d.cloneAndRemove(old))
 		close(old.inbound)
 	}
 	d.sessions[sessionID] = entry
-	d.indexEntry(entry)
+	// 添加新 entry 的索引（copy-on-write）
+	d.idx.Store(d.cloneAndAdd(entry))
 	d.mu.Unlock()
 
 	log.Printf("[dispatcher] registered session %s (ipv4=%s ipv6=%s)", sessionID, ipv4Prefix, ipv6Prefix)
@@ -66,30 +132,13 @@ func (d *PacketDispatcher) RegisterSession(sessionID string, ipv4Prefix, ipv6Pre
 func (d *PacketDispatcher) UnregisterSession(sessionID string) {
 	d.mu.Lock()
 	if entry, ok := d.sessions[sessionID]; ok {
-		d.unindexEntry(entry)
+		// 移除索引（copy-on-write）
+		d.idx.Store(d.cloneAndRemove(entry))
 		delete(d.sessions, sessionID)
 		close(entry.inbound)
 	}
 	d.mu.Unlock()
 	log.Printf("[dispatcher] unregistered session %s", sessionID)
-}
-
-func (d *PacketDispatcher) indexEntry(entry *dispatchEntry) {
-	if addr, ok := hostRouteAddr(entry.ipv4Prefix); ok {
-		d.ipv4Index[addr] = entry
-	}
-	if addr, ok := hostRouteAddr(entry.ipv6Prefix); ok {
-		d.ipv6Index[addr] = entry
-	}
-}
-
-func (d *PacketDispatcher) unindexEntry(entry *dispatchEntry) {
-	if addr, ok := hostRouteAddr(entry.ipv4Prefix); ok {
-		delete(d.ipv4Index, addr)
-	}
-	if addr, ok := hostRouteAddr(entry.ipv6Prefix); ok {
-		delete(d.ipv6Index, addr)
-	}
 }
 
 func hostRouteAddr(prefix netip.Prefix) (netip.Addr, bool) {
@@ -169,6 +218,9 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 			select {
 			case target.inbound <- pktCopy:
 			default:
+				if observability.Global != nil {
+					observability.Global.RecordDrop("dispatcher_inbound_full")
+				}
 				bufferpool.PutPacket(pktCopy)
 			}
 		}
@@ -176,28 +228,20 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 }
 
 func (d *PacketDispatcher) lookupSession(dstAddr netip.Addr) *dispatchEntry {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
+	// 无锁读取：原子加载索引快照
+	idx := d.idx.Load()
+	
 	if dstAddr.Is4() {
-		if entry := d.ipv4Index[dstAddr]; entry != nil {
+		if entry := idx.ipv4[dstAddr]; entry != nil {
 			return entry
 		}
 	} else if dstAddr.Is6() {
-		if entry := d.ipv6Index[dstAddr]; entry != nil {
+		if entry := idx.ipv6[dstAddr]; entry != nil {
 			return entry
 		}
 	}
-
-	// 回退到前缀匹配，兼容未来非 /32 /128 的分配策略。
-	for _, entry := range d.sessions {
-		if entry.ipv4Prefix.IsValid() && entry.ipv4Prefix.Contains(dstAddr) {
-			return entry
-		}
-		if entry.ipv6Prefix.IsValid() && entry.ipv6Prefix.Contains(dstAddr) {
-			return entry
-		}
-	}
+	
+	// 不再回退到线性扫描，假设所有分配都是 /32 或 /128
 	return nil
 }
 

@@ -74,6 +74,16 @@ type SalamanderPacketConn struct {
 
 	// writeBufPool 发送缓冲区池，避免 WriteTo 每次 make([]byte, 8+len(p))
 	// 逃逸到堆。使用全局 bufferpool（64KB），足以容纳任何 MTU 包 + salt。
+
+	// Key caching for read path (hot path optimization)
+	lastReadSalt [salamanderSaltLen]byte
+	lastReadKey  [blake2b.Size256]byte
+	hasReadKey   bool
+
+	// Key caching for write path (hot path optimization)
+	lastWriteSalt [salamanderSaltLen]byte
+	lastWriteKey  [blake2b.Size256]byte
+	hasWriteKey   bool
 }
 
 // NewSalamanderConn 创建一个 Salamander 混淆的 PacketConn。
@@ -99,6 +109,20 @@ func NewSalamanderConn(conn net.PacketConn, password string) net.PacketConn {
 	}
 }
 
+// bytesEqual 比较两个字节切片是否相等（用于 salt 比较）。
+// 使用简单循环而非 bytes.Equal 以避免导入 bytes 包。
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadFrom 从底层 socket 读取一个 UDP 包并解密。
 //
 // 包格式：[salt:8][密文:n]
@@ -106,6 +130,7 @@ func NewSalamanderConn(conn net.PacketConn, password string) net.PacketConn {
 // 如果包长度 <= 8（只有 salt 或更短），视为无效包跳过。
 //
 // 热路径零分配：key 派生使用预分配 readKeyBuf，解密原地写入 p。
+// 性能优化：缓存上次的 salt+key，如果 salt 相同则跳过 BLAKE2b 计算。
 func (s *SalamanderPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	n, addr, err = s.PacketConn.ReadFrom(p)
 	if err != nil {
@@ -117,9 +142,24 @@ func (s *SalamanderPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 		return
 	}
 
-	// 用 salt 派生 key：将 salt 写入 readKeyBuf 尾部，password 部分在构造时已填好
-	copy(s.readKeyBuf[len(s.password):], p[:salamanderSaltLen])
-	key := blake2b.Sum256(s.readKeyBuf)
+	// 提取 salt
+	salt := p[:salamanderSaltLen]
+
+	// 检查缓存：如果 salt 与上次相同，直接复用 key
+	var key [blake2b.Size256]byte
+	if s.hasReadKey && bytesEqual(salt, s.lastReadSalt[:]) {
+		// Cache hit: 复用上次的 key
+		key = s.lastReadKey
+	} else {
+		// Cache miss: 派生新 key 并更新缓存
+		copy(s.readKeyBuf[len(s.password):], salt)
+		key = blake2b.Sum256(s.readKeyBuf)
+
+		// 更新缓存
+		copy(s.lastReadSalt[:], salt)
+		s.lastReadKey = key
+		s.hasReadKey = true
+	}
 
 	// XOR 解密：密文覆盖到 p[0:] 起始位置
 	ciphertext := p[salamanderSaltLen:n]
@@ -138,6 +178,9 @@ func (s *SalamanderPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 // 热路径零分配（稳态）：
 //   - 发送缓冲区从 bufferpool 获取/归还（sync.Pool，预热后 0 allocs/op）
 //   - key 派生使用预分配 writeKeyBuf
+//
+// 性能优化：缓存上次的 salt+key，在短时间内复用 salt 以提高缓存命中率。
+// 这在批量发送场景下特别有效（例如 TUN 批量写入）。
 func (s *SalamanderPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	// 从 bufferpool 获取发送缓冲区（64KB，远大于 MTU+salt）
 	buf := bufferpool.GetPacket()
@@ -145,14 +188,28 @@ func (s *SalamanderPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 
 	sendLen := salamanderSaltLen + len(p)
 
-	// 生成随机 salt → buf[0:8]
-	if _, err = rand.Read(buf[:salamanderSaltLen]); err != nil {
-		return
-	}
+	var key [blake2b.Size256]byte
 
-	// 派生 key：将 salt 写入 writeKeyBuf 尾部
-	copy(s.writeKeyBuf[len(s.password):], buf[:salamanderSaltLen])
-	key := blake2b.Sum256(s.writeKeyBuf)
+	// 尝试复用上次的 salt 和 key（批量写入优化）
+	if s.hasWriteKey {
+		// Cache hit: 复用上次的 salt 和 key
+		copy(buf[:salamanderSaltLen], s.lastWriteSalt[:])
+		key = s.lastWriteKey
+	} else {
+		// Cache miss: 生成新 salt 并派生 key
+		if _, err = rand.Read(buf[:salamanderSaltLen]); err != nil {
+			return
+		}
+
+		// 派生 key：将 salt 写入 writeKeyBuf 尾部
+		copy(s.writeKeyBuf[len(s.password):], buf[:salamanderSaltLen])
+		key = blake2b.Sum256(s.writeKeyBuf)
+
+		// 更新缓存
+		copy(s.lastWriteSalt[:], buf[:salamanderSaltLen])
+		s.lastWriteKey = key
+		s.hasWriteKey = true
+	}
 
 	// XOR 加密 payload → buf[8:]
 	for i, c := range p {
@@ -166,6 +223,13 @@ func (s *SalamanderPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 
 	// 返回原始 payload 长度（调用方不感知 salt overhead）
 	return len(p), nil
+}
+
+// Underlying returns the underlying PacketConn.
+// This implements the udpsocket.Unwrapper interface, allowing
+// the udpsocket.SetBuffers helper to access the real UDP socket.
+func (s *SalamanderPacketConn) Underlying() net.PacketConn {
+	return s.PacketConn
 }
 
 

@@ -107,6 +107,8 @@ sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
     "listen": ":443",
     "uri_template": "/.well-known/masque/ip",
     "admin_listen": ":9090",
+    "unauthenticated_metrics": true,
+    "enable_pprof": false,
     "tun": {
       "name": "tun0",
       "mtu": 1420
@@ -121,6 +123,9 @@ sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
       "session_cache_size":   256
     },
     "http3": {
+      "udp_recv_buffer":   16777216,
+      "udp_send_buffer":   16777216,
+      "enable_gso":        true,
       "enable_datagrams":  true,
       "max_idle_timeout":  "60s",
       "keep_alive_period": "20s"
@@ -135,12 +140,28 @@ sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
 
 完整示例见 [`config.server.example.json`](config.server.example.json)。
 
+#### 性能优化配置项
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `http3.udp_recv_buffer` | 16777216 (16MB) | UDP 接收缓冲区大小（字节），高吞吐场景建议 16-32MB |
+| `http3.udp_send_buffer` | 16777216 (16MB) | UDP 发送缓冲区大小（字节），高吞吐场景建议 16-32MB |
+| `http3.enable_gso` | true | 启用 GSO/GRO（Linux），减少系统调用次数，提升吞吐 |
+| `enable_pprof` | false | 启用 pprof 性能分析端点（`/debug/pprof/*`），需配合 `admin_listen` 使用 |
+
+**高带宽场景调优建议**：
+- 10 Gbps 链路：`udp_recv_buffer` 和 `udp_send_buffer` 设为 32MB，`enable_gso: true`
+- 多核服务器：客户端配置 `num_sessions: 4` 或更高，充分利用多核和多连接带宽
+- 详细调优指南见 [PERFORMANCE_TUNING.md](PERFORMANCE_TUNING.md)
+
 ### 客户端配置
 
 ```json
 {
   "mode": "client",
   "client": {
+    "admin_listen": ":9091",
+    "enable_pprof": false,
     "tun": {
       "name": "tun0",
       "mtu": 1420
@@ -155,6 +176,9 @@ sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
       "session_cache_size":   128
     },
     "http3": {
+      "udp_recv_buffer":   16777216,
+      "udp_send_buffer":   16777216,
+      "enable_gso":        true,
       "enable_datagrams":  true,
       "max_idle_timeout":  "30s",
       "keep_alive_period": "10s"
@@ -188,6 +212,19 @@ sudo ./bin/connect-ip-tunnel -c deploy/client/config.json
 | DELETE | `/api/v1/sessions/{id}` | 强制断开 session |
 | GET | `/api/v1/stats` | 全局统计（session 数、内存、GC） |
 | GET | `/api/v1/ippool/stats` | IP 池使用情况 |
+| GET | `/debug/pprof/*` | pprof 性能分析端点（需配置 `enable_pprof: true`） |
+
+**pprof 端点**（需配置 `enable_pprof: true`）：
+
+| 端点 | 说明 |
+|------|------|
+| `/debug/pprof/` | pprof 索引页 |
+| `/debug/pprof/profile?seconds=30` | CPU profile（采样 30 秒） |
+| `/debug/pprof/heap` | 内存 profile |
+| `/debug/pprof/goroutine` | goroutine 堆栈 |
+| `/debug/pprof/allocs` | 内存分配 profile |
+| `/debug/pprof/block` | 阻塞 profile |
+| `/debug/pprof/mutex` | 互斥锁 profile |
 
 示例：
 
@@ -203,6 +240,12 @@ curl http://localhost:9090/api/v1/stats
 
 # Prometheus 指标
 curl http://localhost:9090/metrics
+
+# pprof CPU profile（需配置 enable_pprof: true）
+go tool pprof http://localhost:9090/debug/pprof/profile?seconds=30
+
+# pprof 内存 profile
+go tool pprof http://localhost:9090/debug/pprof/heap
 ```
 
 ---
@@ -309,12 +352,13 @@ curl -b "certsrv_session=<token>" \
 | `connect_ip_tunnel_sessions_total` | Counter | 累计建立 session 数 |
 | `connect_ip_tunnel_session_errors_total` | Counter | session 错误数（按原因） |
 | `connect_ip_tunnel_session_duration_seconds` | Histogram | session 时长分布 |
-| `connect_ip_tunnel_bytes_rx_total` | Counter | 上行字节数（按 session） |
-| `connect_ip_tunnel_bytes_tx_total` | Counter | 下行字节数（按 session） |
+| `connect_ip_tunnel_bytes_rx_total` | Counter | 上行字节数 |
+| `connect_ip_tunnel_bytes_tx_total` | Counter | 下行字节数 |
 | `connect_ip_tunnel_packet_drops_total` | Counter | 丢包数（按原因） |
 | `connect_ip_tunnel_ippool_allocated` | Gauge | IP 池已分配地址数 |
 | `connect_ip_tunnel_mtls_handshakes_total` | Counter | mTLS 握手次数（按结果） |
 | `connect_ip_tunnel_dispatcher_lookup_duration_microseconds` | Histogram | Session 查找耗时分布 |
+| `connect_ip_tunnel_udp_socket_buffer_bytes` | Gauge | UDP socket 缓冲区大小（按 family 和 direction） |
 
 ---
 
@@ -475,6 +519,8 @@ make build-all
 
 ## 参考资料
 
+- [性能调优指南](PERFORMANCE_TUNING.md) — UDP buffer、GSO/GRO、多 session 并行、benchmark 测试
+- [性能分析报告](PERF_ANALYSIS.md) — Flow Distributor 性能分析与 10 Gbps 验证
 - [RFC 9484 — Proxying IP in HTTP](https://www.rfc-editor.org/rfc/rfc9484)
 - [RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)
 - [RFC 8200 — Internet Protocol, Version 6 (IPv6) Specification](https://www.rfc-editor.org/rfc/rfc8200)

@@ -123,3 +123,12 @@ func (c *androidConfigurator) Teardown(ifName string) error {
 	_ = ifName
 	return nil
 }
+
+// UpdateAddress 在 Android 上是 no-op：地址 / 路由 / DNS 由
+// VPNService.Builder 在 fd 创建期固化，进程内无法热更新；上层
+// 应在监测到地址变化时主动重建 VPN 接口。
+func (c *androidConfigurator) UpdateAddress(prev, next NetworkConfig) error {
+	_ = prev
+	_ = next
+	return nil
+}

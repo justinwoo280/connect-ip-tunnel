@@ -64,3 +64,9 @@ func (c *stubConfigurator) Teardown(ifName string) error {
 	_ = ifName
 	return ErrNotImplemented
 }
+
+func (c *stubConfigurator) UpdateAddress(prev, next NetworkConfig) error {
+	_ = prev
+	_ = next
+	return ErrNotImplemented
+}

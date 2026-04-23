@@ -300,6 +300,46 @@ func (p *IPPool) Stats() IPPoolStats {
 	}
 }
 
+// Capacity 返回地址池的真实可用地址数（除去网络地址和网关）
+// 返回 (IPv4 可用数, IPv6 可用数)
+func (p *IPPool) Capacity() (v4, v6 int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// IPv4 容量计算：2^(32-bits) - 2（网络地址 .0 和网关 .1）
+	if p.ipv4Pool.IsValid() {
+		bits := p.ipv4Pool.Bits()
+		if bits < 32 {
+			totalAddrs := 1 << (32 - bits)
+			v4 = totalAddrs - 2 // 减去网络地址和网关
+			if v4 < 0 {
+				v4 = 0
+			}
+		}
+	}
+
+	// IPv6 容量计算：2^(128-bits) - 2（网络地址 ::0 和网关 ::1）
+	if p.ipv6Pool.IsValid() {
+		bits := p.ipv6Pool.Bits()
+		if bits < 128 {
+			// IPv6 地址空间巨大，避免溢出，限制最大值
+			hostBits := 128 - bits
+			if hostBits > 31 {
+				// 超过 2^31，返回一个大数表示"无限"
+				v6 = 1<<31 - 1
+			} else {
+				totalAddrs := 1 << hostBits
+				v6 = totalAddrs - 2
+				if v6 < 0 {
+					v6 = 0
+				}
+			}
+		}
+	}
+
+	return v4, v6
+}
+
 func (p *IPPool) countUniqueSessions() int {
 	return len(p.sessionToClient)
 }

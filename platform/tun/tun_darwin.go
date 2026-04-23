@@ -186,6 +186,11 @@ func (c *darwinConfigurator) Teardown(ifName string) error {
 	return nil
 }
 
+// UpdateAddress 在 macOS 上走通用 "重新 setup" 兜底路径。
+func (c *darwinConfigurator) UpdateAddress(prev, next NetworkConfig) error {
+	return updateAddressByReSetup(c, prev, next)
+}
+
 func setMacOSDNS(dns, ipv6DNS string) error {
 	line := "d.add ServerAddresses *"
 	if dns != "" {

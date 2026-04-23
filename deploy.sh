@@ -28,7 +28,23 @@ CONFIG_FILE=""                         # 配置文件路径
 
 # 服务端参数（交互时填写）
 SERVER_PORT="443"
-ADMIN_PORT="9090"
+ADMIN_PORT="9090"                      # 管理/Metrics 端口（默认仅绑 127.0.0.1）
+ADMIN_BIND="127.0.0.1"                 # 管理 API 绑定地址，强烈建议 loopback；公网请配合 ADMIN_TOKEN
+ADMIN_TOKEN=""                         # 留空则自动生成 32 字节随机 token（hex）
+ADMIN_UNAUTH_METRICS="true"            # 允许匿名访问 /metrics（true=Prometheus 抓取友好）
+
+# Happy Eyeballs / 双栈偏好（spec T2）
+PREFER_ADDRESS_FAMILY="auto"           # auto | v4 | v6（auto = IPv6 优先，IPv4 兜底）
+HAPPY_EYEBALLS_DELAY="50ms"            # RFC 8305 推荐 250ms；本项目默认更激进的 50ms
+
+# 性能优化（spec T3）
+UDP_RECV_BUFFER="16777216"             # 16 MiB；服务端代码会自动 setsockopt
+UDP_SEND_BUFFER="16777216"             # 16 MiB
+ENABLE_GSO="true"                      # Linux GSO/GRO 批量收发，跨 5x 吞吐改善
+
+# Session 管理（spec T1）
+SESSION_IDLE_TIMEOUT="5m"              # 服务端清理空闲 session 的间隔；0 = 禁用
+
 IPV4_POOL="10.233.0.0/16"
 IPV6_POOL="fd00::/64"
 ENABLE_NAT="true"
@@ -117,6 +133,52 @@ prompt() {
     fi
     read -r input
     echo "${input:-$default}"
+}
+
+# 写入并加载 /etc/sysctl.d/99-connect-ip-tunnel.conf 的内核参数：
+#   - 开启 IPv4/IPv6 转发（Linux 转发必备）
+#   - QUIC/UDP 高吞吐缓冲（spec T3 性能优化要求；与服务端代码 setsockopt 配合可达 16MB）
+#   - netdev backlog（高 pps 下避免 NIC 软中断丢包）
+#   - 大文件描述符上限（多 session 并发）
+# 任何参数应用失败仅记 warn，不中断部署 —— 容器内 / 受限内核可能拒绝部分键。
+apply_kernel_tuning() {
+    cat > /etc/sysctl.d/99-connect-ip-tunnel.conf <<'EOF'
+# === connect-ip-tunnel 内核优化 ===
+# 转发开关
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+
+# UDP socket buffer（与服务端 udp_recv_buffer/udp_send_buffer 配合；spec T3）
+# 默认上限太小（~200KiB），导致 QUIC 在 1Gbps+ 时收包丢包率飙升
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+
+# 软中断收包队列长度（高 pps 防丢包）
+net.core.netdev_max_backlog = 5000
+
+# UDP 内存阈值（QUIC 大量小包友好）
+net.ipv4.udp_mem = 102400 873800 16777216
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# 全局文件描述符上限（多 session 并发）
+fs.file-max = 1048576
+EOF
+    sysctl -p /etc/sysctl.d/99-connect-ip-tunnel.conf 2>&1 | grep -E '^(error|sysctl:)' >&2 || true
+    info "内核转发 + UDP/QUIC 缓冲参数已写入 /etc/sysctl.d/99-connect-ip-tunnel.conf"
+}
+
+# 生成 32 字节随机 admin token（hex 编码 = 64 字符），优先 openssl，回退 /dev/urandom。
+# 用于 admin API（/api/v1/*） + pprof 端点的 Bearer 鉴权。spec T5 §5 要求。
+gen_admin_token() {
+    if command_exists openssl; then
+        openssl rand -hex 32
+    else
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+    fi
 }
 
 prompt_yn() {
@@ -265,25 +327,36 @@ gen_server_config() {
       }"
     fi
 
+    # admin_token 段：仅当配置了 token 时写入，否则省略字段（loopback 模式可裸跑）
+    local admin_token_field=""
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        admin_token_field=",
+    \"admin_token\":             \"${ADMIN_TOKEN}\""
+    fi
+
     cat > "$config_file" <<EOF
 {
   "mode": "server",
   "server": {
-    "listen": ":${SERVER_PORT}",
-    "uri_template": "https://${SERVER_HOSTNAME}/.well-known/masque/ip",
-    "admin_listen": ":${ADMIN_PORT}",
+    "listen":                   ":${SERVER_PORT}",
+    "uri_template":             "https://${SERVER_HOSTNAME}/.well-known/masque/ip",
+    "admin_listen":             "${ADMIN_BIND}:${ADMIN_PORT}",
+    "unauthenticated_metrics":  ${ADMIN_UNAUTH_METRICS},
+    "session_idle_timeout":     "${SESSION_IDLE_TIMEOUT}"${admin_token_field},
     "tun": {
       "name": "${TUN_NAME}",
       "mtu": ${TUN_MTU}
     },
     "tls": {
-      "cert_file":           "${cert_prefix}/server.crt",
-      "key_file":            "${cert_prefix}/server.key",
-      "enable_mtls":         true,
-      "client_ca_file":      "${cert_prefix}/ca.crt",
-      "enable_pqc":          true,
-      "enable_session_cache": true,
-      "session_cache_size":  256${crl_config}
+      "cert_file":               "${cert_prefix}/server.crt",
+      "key_file":                "${cert_prefix}/server.key",
+      "enable_mtls":             true,
+      "client_ca_file":          "${cert_prefix}/ca.crt",
+      "enable_pqc":              true,
+      "enable_session_cache":    true,
+      "session_cache_size":      256,
+      "prefer_address_family":   "${PREFER_ADDRESS_FAMILY}",
+      "happy_eyeballs_delay":    "${HAPPY_EYEBALLS_DELAY}"${crl_config}
     },
     "http3": {
       "enable_datagrams":        true,
@@ -293,7 +366,10 @@ gen_server_config() {
       "initial_stream_window":   16777216,
       "max_stream_window":       67108864,
       "initial_conn_window":     33554432,
-      "max_conn_window":         134217728${obfs_section}${congestion_section}
+      "max_conn_window":         134217728,
+      "udp_recv_buffer":         ${UDP_RECV_BUFFER},
+      "udp_send_buffer":         ${UDP_SEND_BUFFER},
+      "enable_gso":              ${ENABLE_GSO}${obfs_section}${congestion_section}
     },
     "ipv4_pool":    "${IPV4_POOL}",
     "ipv6_pool":    "${IPV6_POOL}",
@@ -303,6 +379,23 @@ gen_server_config() {
 }
 EOF
     info "配置文件已生成"
+
+    # JSON 语法校验：优先 jq，回退 python，最后用 go run
+    if command_exists jq; then
+        if ! jq empty "$config_file" 2>/tmp/cit_jq.err; then
+            error "生成的配置文件 JSON 语法错误："
+            cat /tmp/cit_jq.err >&2
+            exit 1
+        fi
+        info "配置文件 JSON 语法检查通过 ✓"
+    elif command_exists python3; then
+        if ! python3 -c "import json,sys; json.load(open('$config_file'))" 2>/tmp/cit_py.err; then
+            error "生成的配置文件 JSON 语法错误："
+            cat /tmp/cit_py.err >&2
+            exit 1
+        fi
+        info "配置文件 JSON 语法检查通过 ✓ (python3)"
+    fi
 }
 
 # =============================================================================
@@ -386,6 +479,46 @@ collect_config() {
         OBFS_TYPE=""
         OBFS_PASSWORD=""
     fi
+
+    echo ""
+    section "管理 API / Metrics 配置（spec T5）"
+    echo "  默认绑 127.0.0.1，仅本机可访问；如需公网采集 Prometheus，请配置反向代理或改 ADMIN_BIND"
+    echo ""
+    ADMIN_BIND=$(prompt "管理 API 绑定地址（loopback 推荐）" "$ADMIN_BIND")
+    if [[ "$ADMIN_BIND" != "127.0.0.1" && "$ADMIN_BIND" != "::1" ]]; then
+        warn "admin 绑到非 loopback 地址，必须设置 admin_token"
+    fi
+    if prompt_yn "自动生成 admin_token？（推荐；非 loopback 时强制）" "y"; then
+        ADMIN_TOKEN="$(gen_admin_token)"
+        info "已生成 admin_token：${ADMIN_TOKEN:0:16}…（保存在配置文件中）"
+    else
+        ADMIN_TOKEN=$(prompt "admin_token（留空 = 仅 loopback 可访问，且不能管理）" "")
+    fi
+    if prompt_yn "允许匿名访问 /metrics？（true=Prometheus 直接拉取友好）" "y"; then
+        ADMIN_UNAUTH_METRICS="true"
+    else
+        ADMIN_UNAUTH_METRICS="false"
+    fi
+
+    echo ""
+    section "双栈 / Happy Eyeballs（spec T2）"
+    echo "  auto = IPv6 优先 + IPv4 兜底（推荐）；v4 = 仅 IPv4；v6 = 仅 IPv6"
+    PREFER_ADDRESS_FAMILY=$(prompt "服务端 TLS 段 prefer_address_family" "$PREFER_ADDRESS_FAMILY")
+    HAPPY_EYEBALLS_DELAY=$(prompt "Happy Eyeballs 延迟（如 50ms / 250ms）" "$HAPPY_EYEBALLS_DELAY")
+
+    echo ""
+    section "性能调优（spec T3）"
+    UDP_RECV_BUFFER=$(prompt "UDP 接收缓冲区大小（字节）" "$UDP_RECV_BUFFER")
+    UDP_SEND_BUFFER=$(prompt "UDP 发送缓冲区大小（字节）" "$UDP_SEND_BUFFER")
+    if prompt_yn "启用 GSO/GRO（Linux 批量收发）？" "y"; then
+        ENABLE_GSO="true"
+    else
+        ENABLE_GSO="false"
+    fi
+
+    echo ""
+    section "Session 管理（spec T1）"
+    SESSION_IDLE_TIMEOUT=$(prompt "空闲 session 清理间隔（如 5m，0 = 禁用）" "$SESSION_IDLE_TIMEOUT")
 }
 
 # =============================================================================
@@ -420,6 +553,10 @@ deploy_docker() {
 
     # 生成配置（容器内路径）
     gen_server_config "$CONFIG_FILE" "/etc/connect-ip-tunnel/certs"
+
+    # Docker --net=host 模式直接复用宿主机内核栈，必须做内核参数优化
+    section "配置内核参数（宿主机）"
+    apply_kernel_tuning
 
     section "构建 Docker 镜像"
     # 判断是否在项目根目录
@@ -545,14 +682,9 @@ deploy_systemd() {
     # 生成配置（系统路径）
     gen_server_config "$CONFIG_FILE" "$CERT_DIR"
 
-    # 开启内核转发
+    # 开启内核转发 + 优化 QUIC/UDP 收发参数
     section "配置内核参数"
-    cat > /etc/sysctl.d/99-connect-ip-tunnel.conf <<EOF
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-EOF
-    sysctl -p /etc/sysctl.d/99-connect-ip-tunnel.conf >/dev/null 2>&1
-    info "内核转发已启用"
+    apply_kernel_tuning
 
     # 创建系统用户
     if ! id "connect-ip" &>/dev/null; then
@@ -634,15 +766,23 @@ print_summary() {
     echo -e "${BOLD}${GREEN}║         connect-ip-tunnel 服务端部署完成！           ║${NC}"
     echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${BOLD}运行模式:${NC}   $mode"
-    echo -e "  ${BOLD}服务端IP:${NC}   $public_ip"
-    echo -e "  ${BOLD}隧道端口:${NC}   UDP ${SERVER_PORT}"
-    echo -e "  ${BOLD}管理端口:${NC}   TCP ${ADMIN_PORT}"
-    echo -e "  ${BOLD}IPv4 池:${NC}    ${IPV4_POOL}"
-    echo -e "  ${BOLD}IPv6 池:${NC}    ${IPV6_POOL}"
-    echo -e "  ${BOLD}NAT:${NC}        ${ENABLE_NAT}"
+    echo -e "  ${BOLD}运行模式:${NC}    $mode"
+    echo -e "  ${BOLD}服务端IP:${NC}    $public_ip"
+    echo -e "  ${BOLD}隧道端口:${NC}    UDP ${SERVER_PORT}"
+    echo -e "  ${BOLD}管理端口:${NC}    TCP ${ADMIN_BIND}:${ADMIN_PORT}"
+    echo -e "  ${BOLD}IPv4 池:${NC}     ${IPV4_POOL}"
+    echo -e "  ${BOLD}IPv6 池:${NC}     ${IPV6_POOL}"
+    echo -e "  ${BOLD}NAT:${NC}         ${ENABLE_NAT}"
+    echo -e "  ${BOLD}双栈偏好:${NC}    ${PREFER_ADDRESS_FAMILY} (HE delay ${HAPPY_EYEBALLS_DELAY})"
+    echo -e "  ${BOLD}UDP buffer:${NC}  $((UDP_RECV_BUFFER/1024/1024)) MiB recv / $((UDP_SEND_BUFFER/1024/1024)) MiB send，GSO=${ENABLE_GSO}"
+    echo -e "  ${BOLD}Idle 清理:${NC}   ${SESSION_IDLE_TIMEOUT}"
     if [[ -n "$OBFS_TYPE" ]]; then
     echo -e "  ${BOLD}Obfs 混淆:${NC}    ${OBFS_TYPE} (Salamander)"
+    fi
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}管理 API Bearer Token（请妥善保存）:${NC}"
+    echo -e "    ${ADMIN_TOKEN}"
     fi
     if [[ "$CERTSRV_ENABLED" == "true" && -n "$CERTSRV_PORT" ]]; then
     echo ""
@@ -681,20 +821,27 @@ print_summary() {
     echo ""
 
     # 管理命令提示
+    local auth_hdr=""
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        auth_hdr=" -H \"Authorization: Bearer \$TOKEN\""
+    fi
     echo -e "  ${BOLD}常用命令:${NC}"
     if [[ "$mode" == "docker" ]]; then
         echo -e "    查看日志:  docker logs -f ${CONTAINER_NAME}"
         echo -e "    停止服务:  docker stop ${CONTAINER_NAME}"
         echo -e "    重启服务:  docker restart ${CONTAINER_NAME}"
-        echo -e "    查看会话:  curl http://localhost:${ADMIN_PORT}/api/v1/sessions"
-        echo -e "    查看指标:  curl http://localhost:${ADMIN_PORT}/metrics"
     else
         echo -e "    查看日志:  journalctl -u ${SERVICE_NAME} -f"
         echo -e "    停止服务:  systemctl stop ${SERVICE_NAME}"
         echo -e "    重启服务:  systemctl restart ${SERVICE_NAME}"
         echo -e "    查看状态:  systemctl status ${SERVICE_NAME}"
-        echo -e "    查看会话:  curl http://localhost:${ADMIN_PORT}/api/v1/sessions"
-        echo -e "    查看指标:  curl http://localhost:${ADMIN_PORT}/metrics"
+    fi
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+    echo -e "    查看会话:  TOKEN='${ADMIN_TOKEN}'; curl${auth_hdr} http://${ADMIN_BIND}:${ADMIN_PORT}/api/v1/sessions"
+    echo -e "    查看指标:  curl http://${ADMIN_BIND}:${ADMIN_PORT}/metrics  # 默认匿名可访问"
+    else
+    echo -e "    查看会话:  curl http://${ADMIN_BIND}:${ADMIN_PORT}/api/v1/sessions"
+    echo -e "    查看指标:  curl http://${ADMIN_BIND}:${ADMIN_PORT}/metrics"
     fi
 
     echo ""
@@ -741,6 +888,10 @@ uninstall() {
     # 删除文件
     rm -rf "$INSTALL_DIR" "$DOCKER_CONFIG_DIR"
     rm -f /etc/sysctl.d/99-connect-ip-tunnel.conf
+
+    # 提示用户：删除文件后 sysctl 值仍在内核生效，需要手动 reload 或重启
+    warn "已删除 /etc/sysctl.d/99-connect-ip-tunnel.conf；当前生效的转发/UDP buffer 参数仍保留"
+    warn "如需彻底回滚，请运行: sysctl --system  或重启系统"
 
     # 删除系统用户
     userdel connect-ip 2>/dev/null || true

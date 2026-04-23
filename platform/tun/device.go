@@ -26,7 +26,17 @@ type Factory interface {
 }
 
 // Configurator 负责系统网络配置（地址 / 路由 / DNS）和回滚。
+//
+// UpdateAddress 用于热更新 TUN 上的地址（典型场景：服务端二次下发
+// ADDRESS_ASSIGN，IPv4 / IPv6 prefix 发生变化）。实现需保证：
+//   - 仅修改实际发生变化的地址族，不影响另一族；
+//   - 若 prev 与 next 完全一致，应直接返回 nil；
+//   - 失败时不应留下半配置态（prev 仍可用）。
+//
+// 各平台默认实现可走 "先 Teardown 再 Setup" 兜底；性能 / 功能敏感平台
+// （如 Windows）可改为真正的差量更新。
 type Configurator interface {
 	Setup(cfg NetworkConfig) error
 	Teardown(ifName string) error
+	UpdateAddress(prev, next NetworkConfig) error
 }

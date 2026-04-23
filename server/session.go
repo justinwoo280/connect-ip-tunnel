@@ -29,6 +29,9 @@ type Session struct {
 	rxPackets atomic.Uint64
 	txBytes   atomic.Uint64
 	rxBytes   atomic.Uint64
+	
+	// 应用层活跃度跟踪
+	lastActiveAt atomic.Int64 // unix nano
 }
 
 func newSession(conn *connectipgo.Conn, dev tun.Device, remoteAddr string) *Session {
@@ -42,7 +45,7 @@ func newSession(conn *connectipgo.Conn, dev tun.Device, remoteAddr string) *Sess
 }
 
 func newSessionWithIP(conn *connectipgo.Conn, dev tun.Device, remoteAddr, id string, ipv4, ipv6 netip.Prefix) *Session {
-	return &Session{
+	s := &Session{
 		id:           id,
 		conn:         conn,
 		dev:          dev,
@@ -51,6 +54,8 @@ func newSessionWithIP(conn *connectipgo.Conn, dev tun.Device, remoteAddr, id str
 		assignedIPv4: ipv4,
 		assignedIPv6: ipv6,
 	}
+	s.lastActiveAt.Store(time.Now().UnixNano())
+	return s
 }
 
 // SetInbound 设置由 PacketDispatcher 推送的下行包 channel。
@@ -72,6 +77,7 @@ func (s *Session) ReadPacket(buf []byte) (int, error) {
 	if err == nil && n > 0 {
 		s.rxPackets.Add(1)
 		s.rxBytes.Add(uint64(n))
+		s.UpdateLastActive()
 	}
 	return n, err
 }
@@ -92,6 +98,20 @@ func (s *Session) WritePacket(pkt []byte) error {
 	return nil
 }
 
+// UpdateLastActive 更新最后活跃时间
+func (s *Session) UpdateLastActive() {
+	s.lastActiveAt.Store(time.Now().UnixNano())
+}
+
+// GetLastActive 获取最后活跃时间
+func (s *Session) GetLastActive() time.Time {
+	nano := s.lastActiveAt.Load()
+	if nano == 0 {
+		return s.createdAt
+	}
+	return time.Unix(0, nano)
+}
+
 func (s *Session) Close() error {
 	return s.conn.Close()
 }
@@ -99,6 +119,19 @@ func (s *Session) Close() error {
 // Stats 返回会话流量统计（rx bytes, tx bytes, rx packets, tx packets）。
 func (s *Session) Stats() (rxBytes, txBytes, rxPackets, txPackets uint64) {
 	return s.rxBytes.Load(), s.txBytes.Load(), s.rxPackets.Load(), s.txPackets.Load()
+}
+
+// IsAssignedIP 检查给定的 IP 地址是否为分配给该 session 的 IP
+func (s *Session) IsAssignedIP(addr netip.Addr) bool {
+	// 检查 IPv4
+	if addr.Is4() && s.assignedIPv4.IsValid() {
+		return s.assignedIPv4.Contains(addr)
+	}
+	// 检查 IPv6
+	if addr.Is6() && s.assignedIPv6.IsValid() {
+		return s.assignedIPv6.Contains(addr)
+	}
+	return false
 }
 
 type SessionStats struct {

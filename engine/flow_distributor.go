@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/binary"
 	"net/netip"
+	"sync"
 )
 
 // FlowDistributor 按五元组哈希将 IP 包分发到 N 个 session 之一。
@@ -12,10 +13,16 @@ import (
 //   - n == 1：直接返回 0，跳过哈希计算
 //   - n 为 2 的幂：用位掩码替代除法取模（&mask vs %n），在 x86/arm64 上快约 3-5 倍
 //   - n 非 2 的幂：回退到标准取模
+//
+// 健康过滤：
+//   - 支持标记 session 为不健康，Select 会跳过不健康的 session
 type FlowDistributor struct {
 	n    uint32 // session 数量
 	mask uint32 // n 为 2 的幂时 = n-1，否则为 0（标记用普通取模）
 	pow2 bool   // n 是否为 2 的幂
+	
+	mu      sync.RWMutex
+	healthy []bool // 每个 session 的健康状态
 }
 
 func newFlowDistributor(n int) *FlowDistributor {
@@ -28,19 +35,73 @@ func newFlowDistributor(n int) *FlowDistributor {
 	if isPow2 {
 		mask = un - 1
 	}
-	return &FlowDistributor{n: un, mask: mask, pow2: isPow2}
+	
+	healthy := make([]bool, n)
+	for i := range healthy {
+		healthy[i] = true // 默认所有 session 都是健康的
+	}
+	
+	return &FlowDistributor{
+		n:       un,
+		mask:    mask,
+		pow2:    isPow2,
+		healthy: healthy,
+	}
 }
 
 // Select 返回该包应分发到的 session 索引（0 到 n-1）。
+// 如果首选的 session 不健康，会尝试找一个健康的替代。
 func (f *FlowDistributor) Select(pkt []byte) int {
 	if f.n == 1 {
 		return 0
 	}
+	
 	h := flowHash(pkt)
+	var idx int
 	if f.pow2 {
-		return int(h & f.mask)
+		idx = int(h & f.mask)
+	} else {
+		idx = int(h % f.n)
 	}
-	return int(h % f.n)
+	
+	// 检查首选 session 是否健康
+	f.mu.RLock()
+	if f.healthy[idx] {
+		f.mu.RUnlock()
+		return idx
+	}
+	
+	// 首选不健康，找一个健康的
+	for i := 0; i < int(f.n); i++ {
+		if f.healthy[i] {
+			f.mu.RUnlock()
+			return i
+		}
+	}
+	f.mu.RUnlock()
+	
+	// 没有健康的 session，返回首选（让上层处理错误）
+	return idx
+}
+
+// SetHealthy 设置指定 session 的健康状态
+func (f *FlowDistributor) SetHealthy(idx int, healthy bool) {
+	if idx < 0 || idx >= int(f.n) {
+		return
+	}
+	f.mu.Lock()
+	f.healthy[idx] = healthy
+	f.mu.Unlock()
+}
+
+// GetHealthy 返回指定 session 的健康状态
+func (f *FlowDistributor) GetHealthy(idx int) bool {
+	if idx < 0 || idx >= int(f.n) {
+		return false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.healthy[idx]
 }
 
 // flowHash 从 IP 包头提取流标识字段，计算哈希值。
@@ -100,7 +161,10 @@ func ipv4FlowHash(pkt []byte) uint32 {
 		ports := binary.BigEndian.Uint32(pkt[ihl : ihl+4])
 		return hash4(src, dst, proto, ports)
 	}
-	return hash4(src, dst, proto, 0)
+	// 非 TCP/UDP 协议（如 ICMP、GRE、ESP 等）：
+	// 引入包长和首字节作为二级散列因子，避免所有非 TCP/UDP 包都映射到同一 session
+	discriminator := uint32(pkt[0])<<24 | uint32(len(pkt))
+	return hash4(src, dst, proto, discriminator)
 }
 
 func ipv6FlowHash(pkt []byte) uint32 {

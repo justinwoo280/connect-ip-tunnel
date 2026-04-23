@@ -3,6 +3,7 @@ package connectip
 import (
 	"context"
 	"net/netip"
+	"sync"
 
 	"connect-ip-tunnel/platform/tun"
 
@@ -24,12 +25,18 @@ type SessionInfo struct {
 // Session 包装 connectip.Conn，适配 tunnel.PacketTunnel 接口。
 // WritePacket 处理库返回的 ICMP 回包：若非空则写回 TUN 设备。
 type Session struct {
-	conn *connectipgo.Conn
-	dev  tun.Device // 用于将 ICMP 回包写回 TUN，可为 nil（测试场景）
+	conn      *connectipgo.Conn
+	dev       tun.Device // 用于将 ICMP 回包写回 TUN，可为 nil（测试场景）
+	doneCh    chan struct{}
+	closeOnce sync.Once
 }
 
 func newSession(conn *connectipgo.Conn, dev tun.Device) *Session {
-	return &Session{conn: conn, dev: dev}
+	return &Session{
+		conn:   conn,
+		dev:    dev,
+		doneCh: make(chan struct{}),
+	}
 }
 
 // ReadPacket 从隧道读取一个 IP 包，写入 buf，返回字节数。
@@ -54,7 +61,17 @@ func (s *Session) WritePacket(pkt []byte) error {
 
 // Close 关闭底层 CONNECT-IP 连接。
 func (s *Session) Close() error {
-	return s.conn.Close()
+	var err error
+	s.closeOnce.Do(func() {
+		err = s.conn.Close()
+		close(s.doneCh)
+	})
+	return err
+}
+
+// Done 返回一个 channel，当 session 关闭时会被关闭
+func (s *Session) Done() <-chan struct{} {
+	return s.doneCh
 }
 
 // LocalPrefixes 阻塞直到收到服务端的 ADDRESS_ASSIGN capsule，返回分配的 IP 前缀。
@@ -68,4 +85,3 @@ func (s *Session) LocalPrefixes(ctx context.Context) ([]netip.Prefix, error) {
 func (s *Session) Routes(ctx context.Context) ([]connectipgo.IPRoute, error) {
 	return s.conn.Routes(ctx)
 }
-

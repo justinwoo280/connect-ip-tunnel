@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"connect-ip-tunnel/common/safe"
+	"connect-ip-tunnel/observability"
 )
 
 // CRLFetcher 定时从 URL 拉取 CRL 并缓存，
@@ -22,17 +25,25 @@ type CRLFetcher struct {
 	log        *slog.Logger
 	stopCh     chan struct{}
 	httpClient *http.Client // 携带自定义 CA，用于访问自签证书的 certsrv
+	metrics    *observability.Metrics
+
+	// 可观测性字段
+	startedAt          time.Time // 启动时间
+	firstFetchSuccessAt time.Time // 首次成功拉取时间
+	lastFetchSuccessAt  time.Time // 最近一次成功拉取时间
+	lastErrLogTime      time.Time // 最近一次 ERROR 日志时间（用于去重）
 }
 
 // NewCRLFetcher 创建并启动 CRL 定时拉取器。
 // url：CRL PEM 文件的 HTTP(S) 地址（如 https://127.0.0.1:8443/crl.pem）
 // interval：拉取间隔（建议 5~30 分钟）
 // caCertPEM：访问 certsrv 时使用的 CA 证书（PEM 格式），为 nil 时使用系统 CA 池
+// metrics：Prometheus metrics 实例（可为 nil，此时不上报 metric）
 //
 // 初始拉取失败不阻塞启动：certsrv 可能比主服务晚启动，
 // 此时 crl 为 nil，VerifyFunc 会放行所有连接（宽松模式），
 // 后台 loop 会持续重试直到拉取成功。
-func NewCRLFetcher(url string, interval time.Duration, caCertPEM []byte, log *slog.Logger) (*CRLFetcher, error) {
+func NewCRLFetcher(url string, interval time.Duration, caCertPEM []byte, metrics *observability.Metrics, log *slog.Logger) (*CRLFetcher, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -61,13 +72,20 @@ func NewCRLFetcher(url string, interval time.Duration, caCertPEM []byte, log *sl
 		log:        log,
 		stopCh:     make(chan struct{}),
 		httpClient: httpClient,
+		metrics:    metrics,
+		startedAt:  time.Now(),
 	}
 	// 尝试初始拉取，失败时只打警告，不阻塞启动
 	if err := f.fetch(); err != nil {
 		log.Warn("initial CRL fetch failed, will retry in background (connections allowed until CRL is available)",
 			"url", url, "err", err)
 	}
-	go f.loop()
+	safe.Go("crl.fetcher", func() {
+		f.loop()
+	})
+	safe.Go("crl.metric", func() {
+		f.metricLoop()
+	})
 	return f, nil
 }
 
@@ -144,9 +162,58 @@ func (f *CRLFetcher) loop() {
 					f.log.Warn("CRL fetch failed, retrying soon", "err", err, "retry_in", retryInterval)
 					timer.Reset(retryInterval)
 				}
+				// 检查是否需要输出 ERROR 日志
+				f.checkAndLogError()
 			} else {
 				timer.Reset(f.interval)
 			}
+		case <-f.stopCh:
+			return
+		}
+	}
+}
+
+// checkAndLogError 检查 CRL 是否长时间未成功拉取，输出 ERROR 日志（带去重）
+func (f *CRLFetcher) checkAndLogError() {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	// 启动超过 5 分钟且从未成功拉取过
+	if time.Since(f.startedAt) > 5*time.Minute && f.firstFetchSuccessAt.IsZero() {
+		// 去重：每 5 分钟最多输出一次 ERROR
+		if time.Since(f.lastErrLogTime) >= 5*time.Minute {
+			f.log.Error("CRL has never been fetched successfully for >5min, certificate revocation enforcement is disabled",
+				"url", f.url,
+				"elapsed", time.Since(f.startedAt).Round(time.Second))
+			f.lastErrLogTime = time.Now()
+		}
+	}
+}
+
+// metricLoop 定期上报 CRL 不可用时长 metric
+func (f *CRLFetcher) metricLoop() {
+	if f.metrics == nil {
+		return // 没有 metrics 实例，不上报
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			f.mu.RLock()
+			var unavailableSince time.Time
+			if f.lastFetchSuccessAt.IsZero() {
+				unavailableSince = f.startedAt
+			} else {
+				unavailableSince = f.lastFetchSuccessAt
+			}
+			f.mu.RUnlock()
+
+			// 上报不可用时长（秒）
+			unavailableSeconds := time.Since(unavailableSince).Seconds()
+			f.metrics.CRLUnavailableSeconds.Set(unavailableSeconds)
 		case <-f.stopCh:
 			return
 		}
@@ -191,6 +258,12 @@ func (f *CRLFetcher) fetch() error {
 
 	f.mu.Lock()
 	f.crl = crl
+	// 更新成功时间戳
+	now := time.Now()
+	if f.firstFetchSuccessAt.IsZero() {
+		f.firstFetchSuccessAt = now
+	}
+	f.lastFetchSuccessAt = now
 	f.mu.Unlock()
 
 	f.log.Info("CRL refreshed",

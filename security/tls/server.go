@@ -127,7 +127,7 @@ func NewServer(opts ServerOptions) (ServerConfig, error) {
 		if opts.ClientCAFile != "" {
 			caCertPEM, _ = os.ReadFile(opts.ClientCAFile)
 		}
-		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, caCertPEM, nil)
+		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, caCertPEM, opts.Metrics, nil)
 		if err != nil {
 			return nil, fmt.Errorf("init CRL fetcher: %w", err)
 		}

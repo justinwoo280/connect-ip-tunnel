@@ -7,8 +7,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
+	"net/netip"
 	"sync"
+	"time"
 
+	"connect-ip-tunnel/common/bufferpool"
+	"connect-ip-tunnel/common/safe"
+	"connect-ip-tunnel/common/udpsocket"
 	"connect-ip-tunnel/observability"
 	"connect-ip-tunnel/option"
 	"connect-ip-tunnel/platform/tun"
@@ -29,12 +35,15 @@ type Server struct {
 	tunDevice       tun.Device
 	tunConfigurator tun.Configurator
 	tunIfName       string
+	tunGatewayIPv4  netip.Addr // TUN 网关 IPv4 地址
+	tunGatewayIPv6  netip.Addr // TUN 网关 IPv6 地址
 	routingMgr      *RoutingManager
 	ipPool          *IPPool               // IP 地址池管理
 	dispatcher      *PacketDispatcher     // TUN 包分发器
 	dispatchCancel  context.CancelFunc
 	uriTemplate     *uritemplate.Template // 缓存的 URI template
 	metrics         *observability.Metrics
+	routesPolicy    *RoutesPolicy         // Per-client 路由策略
 
 	listener    *quic.Listener
 	httpServer  *qhttp3.Server
@@ -42,6 +51,8 @@ type Server struct {
 
 	sessions   map[string]*Session // sessionID -> Session
 	sessionsMu sync.RWMutex
+
+	transport *quic.Transport // Shared QUIC transport
 
 	startOnce sync.Once
 	closeOnce sync.Once
@@ -62,10 +73,22 @@ func New(cfg option.ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("server: invalid uri template %q: %w", cfg.URITemplate, err)
 	}
 	log.Printf("[server] uri template: %s", cfg.URITemplate)
+
+	// 初始化路由策略
+	var routesPolicy *RoutesPolicy
+	if len(cfg.ClientRoutesPolicy) > 0 {
+		routesPolicy, err = NewRoutesPolicy(cfg.ClientRoutesPolicy, nil)
+		if err != nil {
+			return nil, fmt.Errorf("server: invalid client routes policy: %w", err)
+		}
+		log.Printf("[server] per-client routes policy enabled for %d clients", len(cfg.ClientRoutesPolicy))
+	}
+
 	return &Server{
-		cfg:         cfg,
-		sessions:    make(map[string]*Session),
-		uriTemplate: tmpl,
+		cfg:          cfg,
+		sessions:     make(map[string]*Session),
+		uriTemplate:  tmpl,
+		routesPolicy: routesPolicy,
 	}, nil
 }
 
@@ -102,6 +125,11 @@ func (s *Server) Start() error {
 			return
 		}
 		s.tunIfName = ifName
+
+		// 配置包缓冲区大小（MTU + 80 字节预留用于 IP/UDP/QUIC 头部）
+		bufferSize := s.cfg.TUN.MTU + 80
+		bufferpool.SetPacketBufferSize(bufferSize)
+		log.Printf("[server] packet buffer size set to %d (MTU=%d)", bufferSize, s.cfg.TUN.MTU)
 
 		// 创建 IP 地址池
 		ipPool, err := NewIPPool(s.cfg.IPv4Pool, s.cfg.IPv6Pool)
@@ -144,6 +172,18 @@ func (s *Server) Start() error {
 			return
 		}
 		s.routingMgr = routingMgr
+		
+		// 保存 TUN 网关地址用于心跳
+		if tunIPv4 != "" {
+			if prefix, err := netip.ParsePrefix(tunIPv4); err == nil {
+				s.tunGatewayIPv4 = prefix.Addr()
+			}
+		}
+		if tunIPv6 != "" {
+			if prefix, err := netip.ParsePrefix(tunIPv6); err == nil {
+				s.tunGatewayIPv6 = prefix.Addr()
+			}
+		}
 
 		tunCfg := tun.NewConfigurator()
 		s.tunConfigurator = tunCfg
@@ -159,13 +199,19 @@ func (s *Server) Start() error {
 		s.dispatcher = NewPacketDispatcher(tunDevice)
 		dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 		s.dispatchCancel = dispatchCancel
-		go func() {
+		safe.Go("server.dispatcher", func() {
 			if err := s.dispatcher.Run(dispatchCtx); err != nil && dispatchCtx.Err() == nil {
 				log.Printf("[server] dispatcher error: %v", err)
 			}
-		}()
+		})
 
-		// 2. 构建 TLS 配置（含 mTLS + CRL）
+		// 2. 初始化 metrics（在 TLS 之前，以便 CRL fetcher 可以使用）
+		if s.cfg.AdminListen != "" {
+			m := observability.InitMetrics("connect_ip_tunnel")
+			s.metrics = m
+		}
+
+		// 3. 构建 TLS 配置（含 mTLS + CRL）
 		tlsServer, err := securitytls.NewServer(securitytls.ServerOptions{
 			CertFile:           s.cfg.TLS.CertFile,
 			KeyFile:            s.cfg.TLS.KeyFile,
@@ -177,6 +223,7 @@ func (s *Server) Start() error {
 			CRLInterval:        s.cfg.TLS.CRLInterval.Duration,
 			EnableSessionCache: s.cfg.TLS.EnableSessionCache,
 			SessionCacheSize:   s.cfg.TLS.SessionCacheSize,
+			Metrics:            s.metrics, // 传递 metrics 实例
 		})
 		if err != nil {
 			startErr = fmt.Errorf("server: init tls server: %w", err)
@@ -187,7 +234,7 @@ func (s *Server) Start() error {
 			log.Printf("[server] mTLS enabled, client certificates required")
 		}
 
-		// 3. 启动 QUIC 监听器
+		// 4. 启动 QUIC 监听器
 		udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.Listen)
 		if err != nil {
 			startErr = fmt.Errorf("server: resolve listen addr: %w", err)
@@ -200,6 +247,21 @@ func (s *Server) Start() error {
 			return
 		}
 
+		// 设置 UDP socket 缓冲区（性能优化）
+		recvBuf := s.cfg.HTTP3.UDPRecvBuffer
+		sendBuf := s.cfg.HTTP3.UDPSendBuffer
+		if recvBuf == 0 {
+			recvBuf = 16 * 1024 * 1024 // 默认 16MB
+		}
+		if sendBuf == 0 {
+			sendBuf = 16 * 1024 * 1024 // 默认 16MB
+		}
+		
+		// 注意：必须在 obfs 包装之前设置缓冲区，因为 SetBuffers 需要访问底层 UDP socket
+		gotRecv, gotSend := udpsocket.SetBuffers(udpConn, recvBuf)
+		log.Printf("[server] UDP socket buffers: recv=%d send=%d (requested: recv=%d send=%d)",
+			gotRecv, gotSend, recvBuf, sendBuf)
+
 		quicCfg := &quic.Config{
 			EnableDatagrams: true,
 			MaxIdleTimeout:  s.cfg.HTTP3.MaxIdleTimeout.Duration,
@@ -207,12 +269,26 @@ func (s *Server) Start() error {
 		}
 
 		// 如果配置了 Salamander 混淆，包装 UDP socket
-		var listenConn net.PacketConn = udpConn
+		// 注意：必须在创建 quic.Transport 之前包装
+		var baseConn net.PacketConn = udpConn
 		if s.cfg.HTTP3.Obfs.Type == obfs.ObfsTypeSalamander && s.cfg.HTTP3.Obfs.Password != "" {
-			listenConn = obfs.NewSalamanderConn(udpConn, s.cfg.HTTP3.Obfs.Password)
+			baseConn = obfs.NewSalamanderConn(udpConn, s.cfg.HTTP3.Obfs.Password)
 			log.Printf("[server] Salamander obfs enabled")
 		}
-		listener, err := quic.Listen(listenConn, tlsServer.TLSConfig(), quicCfg)
+
+		// 创建 quic.Transport（共享 UDP socket，支持 GSO/GRO）
+		transport := &quic.Transport{
+			Conn: baseConn,
+		}
+		s.transport = transport
+		defer func() {
+			if startErr != nil {
+				_ = transport.Close()
+			}
+		}()
+
+		// 使用 transport.Listen 替代 quic.Listen
+		listener, err := transport.Listen(tlsServer.TLSConfig(), quicCfg)
 		if err != nil {
 			startErr = fmt.Errorf("server: quic listen: %w", err)
 			return
@@ -227,39 +303,86 @@ func (s *Server) Start() error {
 			EnableDatagrams: true,
 		}
 
-		go func() {
+		safe.Go("server.http3", func() {
 			if err := s.httpServer.ServeListener(listener); err != nil {
 				log.Printf("[server] http3 serve error: %v", err)
 			}
-		}()
+		})
 
 		// 6. 启动 Prometheus metrics / 管理 HTTP 端点
 		if s.cfg.AdminListen != "" {
-			m := observability.InitMetrics("connect_ip_tunnel")
-			s.metrics = m
-
 			mux := http.NewServeMux()
-			mux.Handle("/metrics", m.Handler())
+			
+			// /healthz 始终匿名访问
 			mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("ok"))
 			})
-			s.RegisterAPIRoutes(mux)
+
+			// /metrics 根据配置决定是否需要鉴权
+			if s.cfg.UnauthenticatedMetrics {
+				mux.Handle("/metrics", s.metrics.Handler())
+			} else if s.cfg.AdminToken != "" {
+				mux.Handle("/metrics", requireToken(s.cfg.AdminToken)(s.metrics.Handler()))
+			} else {
+				// 默认需要 token，但未配置 token（loopback 地址允许）
+				mux.Handle("/metrics", s.metrics.Handler())
+			}
+
+			// /api/* 和 /debug/pprof/* 必须鉴权（如果配置了 token）
+			if s.cfg.AdminToken != "" {
+				// 创建受保护的子 mux
+				apiMux := http.NewServeMux()
+				s.RegisterAPIRoutes(apiMux)
+				mux.Handle("/api/", requireToken(s.cfg.AdminToken)(apiMux))
+
+				// 挂载 pprof 端点（如果启用）
+				if s.cfg.EnablePprof {
+					pprofMux := http.NewServeMux()
+					pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+					pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+					pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+					pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+					pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+					mux.Handle("/debug/pprof/", requireToken(s.cfg.AdminToken)(pprofMux))
+					log.Printf("[server] pprof endpoints enabled at /debug/pprof/* (auth required)")
+				}
+			} else {
+				s.RegisterAPIRoutes(mux)
+				
+				// 挂载 pprof 端点（如果启用且无 token 配置）
+				if s.cfg.EnablePprof {
+					mux.HandleFunc("/debug/pprof/", pprof.Index)
+					mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+					mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+					mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+					mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+					log.Printf("[server] pprof endpoints enabled at /debug/pprof/* (no auth)")
+				}
+			}
 
 			s.adminServer = &http.Server{
 				Addr:    s.cfg.AdminListen,
-				Handler: mux,
+				Handler: safe.HTTP("server.admin", mux),
 			}
-			go func() {
+			safe.Go("server.admin", func() {
 				log.Printf("[server] admin/metrics listening on %s", s.cfg.AdminListen)
 				if err := s.adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					log.Printf("[server] admin server error: %v", err)
 				}
-			}()
+			})
 		}
 
 		s.started = true
 		log.Printf("[server] started: listen=%s tun=%s", s.cfg.Listen, ifName)
+		
+		// 7. 启动 idle session reaper（如果配置了）
+		if s.cfg.SessionIdleTimeout.Duration > 0 {
+			safe.Go("server.idle-reaper", func() {
+				s.runIdleReaper(context.Background())
+			})
+			log.Printf("[server] idle session reaper enabled: timeout=%v", s.cfg.SessionIdleTimeout.Duration)
+		}
 	})
 
 	if startErr != nil {
@@ -280,7 +403,8 @@ func (s *Server) Close() error {
 		//    并触发已有 handler goroutine 的 context 取消，
 		//    由 handler 的 defer 自行完成 UnregisterSession / ReleaseIP / session.Close。
 		// 2. 停止 dispatcher，确保 TUN 读循环退出。
-		// 3. 最后清理系统资源（路由、TUN）。
+		// 3. 关闭 quic.Transport（释放 UDP socket）。
+		// 4. 最后清理系统资源（路由、TUN）。
 		//
 		// 不在 Close 中重复调用 UnregisterSession/session.Close，
 		// 避免与 handler defer 并发双重清理。
@@ -297,6 +421,13 @@ func (s *Server) Close() error {
 		}
 		if s.listener != nil {
 			if err := s.listener.Close(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+
+		// 关闭 quic.Transport（释放 UDP socket）
+		if s.transport != nil {
+			if err := s.transport.Close(); err != nil && closeErr == nil {
 				closeErr = err
 			}
 		}
@@ -322,4 +453,70 @@ func (s *Server) Close() error {
 		}
 	})
 	return closeErr
+}
+
+
+// runIdleReaper 定期扫描并清理 idle 的 session
+func (s *Server) runIdleReaper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.reapIdleSessions()
+		}
+	}
+}
+
+// reapIdleSessions 清理超过 idle timeout 的 session
+func (s *Server) reapIdleSessions() {
+	if s.cfg.SessionIdleTimeout.Duration == 0 {
+		return
+	}
+	
+	now := time.Now()
+	timeout := s.cfg.SessionIdleTimeout.Duration
+	
+	s.sessionsMu.RLock()
+	var toReap []string
+	for id, sess := range s.sessions {
+		lastActive := sess.GetLastActive()
+		if now.Sub(lastActive) > timeout {
+			toReap = append(toReap, id)
+		}
+	}
+	s.sessionsMu.RUnlock()
+	
+	if len(toReap) == 0 {
+		return
+	}
+
+	log.Printf("[server] reaping %d idle sessions (timeout=%v)", len(toReap), timeout)
+	observability.Global.AddIdleSessionsReaped(len(toReap))
+
+	for _, id := range toReap {
+		s.sessionsMu.RLock()
+		sess, ok := s.sessions[id]
+		s.sessionsMu.RUnlock()
+
+		if ok {
+			log.Printf("[server] reaping idle session %s (last active: %v ago)",
+				id, now.Sub(sess.GetLastActive()))
+			_ = sess.Close()
+		}
+	}
+}
+
+
+// tunGatewayV4 返回 TUN 网关 IPv4 地址
+func (s *Server) tunGatewayV4() netip.Addr {
+	return s.tunGatewayIPv4
+}
+
+// tunGatewayV6 返回 TUN 网关 IPv6 地址
+func (s *Server) tunGatewayV6() netip.Addr {
+	return s.tunGatewayIPv6
 }

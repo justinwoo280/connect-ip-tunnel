@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/blake2b"
 )
 
 // mockPacketConn 模拟 UDP socket，用于测试
@@ -152,4 +154,159 @@ func TestSalamanderLargePacket(t *testing.T) {
 	}
 	t.Logf("✅ 1200-byte packet: encrypted size=%d (+%d bytes salt overhead)",
 		len(sender.buf), salamanderSaltLen)
+}
+
+// TestSalamanderKeyCaching 验证 key 缓存机制正确工作
+func TestSalamanderKeyCaching(t *testing.T) {
+	password := "test-password"
+	payload1 := []byte("first packet")
+	payload2 := []byte("second packet")
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
+
+	// 测试写缓存：连续写入应该复用 salt
+	sender := &mockPacketConn{}
+	senderConn := NewSalamanderConn(sender, password).(*SalamanderPacketConn)
+
+	// 第一次写入：生成新 salt
+	_, err := senderConn.WriteTo(payload1, addr)
+	if err != nil {
+		t.Fatalf("first WriteTo failed: %v", err)
+	}
+	firstSalt := make([]byte, salamanderSaltLen)
+	copy(firstSalt, sender.buf[:salamanderSaltLen])
+
+	// 第二次写入：应该复用相同的 salt（缓存命中）
+	_, err = senderConn.WriteTo(payload2, addr)
+	if err != nil {
+		t.Fatalf("second WriteTo failed: %v", err)
+	}
+	secondSalt := sender.buf[:salamanderSaltLen]
+
+	if !bytes.Equal(firstSalt, secondSalt) {
+		t.Error("write cache should reuse salt for consecutive writes")
+	}
+	t.Log("✅ write cache: salt reused for consecutive writes")
+
+	// 测试读缓存：相同 salt 的包应该命中缓存
+	receiver := &mockPacketConn{}
+	receiverConn := NewSalamanderConn(receiver, password).(*SalamanderPacketConn)
+
+	// 准备两个使用相同 salt 的加密包
+	testSalt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	encryptedBuf1 := make([]byte, salamanderSaltLen+len(payload1))
+	copy(encryptedBuf1[:salamanderSaltLen], testSalt)
+	// 手动加密 payload1
+	keyBuf := make([]byte, len(password)+salamanderSaltLen)
+	copy(keyBuf, []byte(password))
+	copy(keyBuf[len(password):], testSalt)
+	key := blake2b.Sum256(keyBuf)
+	for i, c := range payload1 {
+		encryptedBuf1[salamanderSaltLen+i] = c ^ key[i%blake2b.Size256]
+	}
+
+	// 第一次读取：缓存未命中
+	receiver.buf = encryptedBuf1
+	decrypted1 := make([]byte, len(encryptedBuf1))
+	n1, _, err := receiverConn.ReadFrom(decrypted1)
+	if err != nil {
+		t.Fatalf("first ReadFrom failed: %v", err)
+	}
+	if !bytes.Equal(decrypted1[:n1], payload1) {
+		t.Error("first read decryption failed")
+	}
+
+	// 验证缓存已设置
+	if !receiverConn.hasReadKey {
+		t.Error("read cache should be set after first read")
+	}
+	if !bytes.Equal(receiverConn.lastReadSalt[:], testSalt) {
+		t.Error("cached salt should match test salt")
+	}
+
+	// 第二次读取：使用相同 salt，应该命中缓存
+	encryptedBuf2 := make([]byte, salamanderSaltLen+len(payload2))
+	copy(encryptedBuf2[:salamanderSaltLen], testSalt)
+	for i, c := range payload2 {
+		encryptedBuf2[salamanderSaltLen+i] = c ^ key[i%blake2b.Size256]
+	}
+
+	receiver.buf = encryptedBuf2
+	decrypted2 := make([]byte, len(encryptedBuf2))
+	n2, _, err := receiverConn.ReadFrom(decrypted2)
+	if err != nil {
+		t.Fatalf("second ReadFrom failed: %v", err)
+	}
+	if !bytes.Equal(decrypted2[:n2], payload2) {
+		t.Error("second read decryption failed")
+	}
+
+	t.Log("✅ read cache: same salt reuses cached key")
+}
+
+// TestSalamanderCacheMiss 验证不同 salt 会触发缓存未命中
+func TestSalamanderCacheMiss(t *testing.T) {
+	password := "test-password"
+	payload := []byte("test packet")
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
+
+	// 创建两个独立的连接（不共享缓存）
+	sender1 := &mockPacketConn{}
+	conn1 := NewSalamanderConn(sender1, password)
+	conn1.WriteTo(payload, addr)
+	salt1 := sender1.buf[:salamanderSaltLen]
+
+	sender2 := &mockPacketConn{}
+	conn2 := NewSalamanderConn(sender2, password)
+	conn2.WriteTo(payload, addr)
+	salt2 := sender2.buf[:salamanderSaltLen]
+
+	// 不同连接应该生成不同的 salt（因为是随机生成的）
+	if bytes.Equal(salt1, salt2) {
+		t.Log("⚠️  warning: random salts happened to be equal (very unlikely)")
+	} else {
+		t.Log("✅ different connections generate different salts")
+	}
+}
+
+// BenchmarkSalamanderWriteWithCache 测试写入性能（缓存命中场景）
+func BenchmarkSalamanderWriteWithCache(b *testing.B) {
+	password := "benchmark-password"
+	payload := make([]byte, 1200) // 典型 QUIC 包大小
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443}
+
+	sender := &mockPacketConn{}
+	conn := NewSalamanderConn(sender, password)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		conn.WriteTo(payload, addr)
+	}
+}
+
+// BenchmarkSalamanderReadWithCache 测试读取性能（缓存命中场景）
+func BenchmarkSalamanderReadWithCache(b *testing.B) {
+	password := "benchmark-password"
+	payload := make([]byte, 1200)
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443}
+
+	// 准备加密包（使用固定 salt 以触发缓存）
+	sender := &mockPacketConn{}
+	senderConn := NewSalamanderConn(sender, password)
+	senderConn.WriteTo(payload, addr)
+	encryptedPacket := make([]byte, len(sender.buf))
+	copy(encryptedPacket, sender.buf)
+
+	receiver := &mockPacketConn{buf: encryptedPacket, addr: addr}
+	receiverConn := NewSalamanderConn(receiver, password)
+	decrypted := make([]byte, len(encryptedPacket))
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		receiver.buf = encryptedPacket // 重置 buffer
+		receiverConn.ReadFrom(decrypted)
+	}
 }

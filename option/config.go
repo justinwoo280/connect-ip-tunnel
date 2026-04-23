@@ -63,6 +63,14 @@ type ClientConfig struct {
 	// AdminListen 管理/统计 HTTP 接口监听地址（留空则不启动）
 	// 例如 "127.0.0.1:9091" 或 "127.0.0.1:0"（随机端口，从日志读取实际端口）
 	AdminListen string `json:"admin_listen,omitempty"`
+
+	// AdminToken 管理 API 访问令牌（Bearer token）
+	// 当 AdminListen 不是 loopback 地址时必须设置
+	AdminToken string `json:"admin_token,omitempty"`
+
+	// EnablePprof 启用 pprof 性能分析端点（/debug/pprof/*）
+	// 仅在 AdminListen 启用时生效，受 AdminToken 保护
+	EnablePprof bool `json:"enable_pprof,omitempty"`
 }
 
 // ServerConfig 服务端配置
@@ -81,6 +89,19 @@ type ServerConfig struct {
 	// 路由配置
 	EnableNAT    bool   `json:"enable_nat"`    // 启用 NAT（MASQUERADE）
 	NATInterface string `json:"nat_interface"` // NAT 出口接口（留空自动检测）
+
+	// 管理 API 鉴权配置
+	AdminToken             string `json:"admin_token,omitempty"`              // 管理 API 访问令牌（Bearer token）
+	UnauthenticatedMetrics bool   `json:"unauthenticated_metrics,omitempty"`  // 允许匿名访问 /metrics（默认 true）
+	EnablePprof            bool   `json:"enable_pprof,omitempty"`             // 启用 pprof 性能分析端点（/debug/pprof/*）
+
+	// Session 管理配置
+	SessionIdleTimeout Duration `json:"session_idle_timeout"` // 应用层 idle 清理间隔，默认 5m，0 = 禁用
+
+	// Per-client 路由策略（基于 mTLS 证书 CN）
+	// 例如 {"alice": ["10.0.0.0/8"], "bob": ["192.168.0.0/16"]}
+	// 未配置的客户端使用全路由（0.0.0.0/0 + ::/0）
+	ClientRoutesPolicy map[string][]string `json:"client_routes_policy,omitempty"`
 
 	// CertSrv：CA 证书管理 Web 面板（留空则不启动）
 	CertSrv CertSrvConfig `json:"certsrv,omitempty"`
@@ -117,11 +138,22 @@ type TUNConfig struct {
 type BypassConfig struct {
 	Enable     bool   `json:"enable"`
 	ServerAddr string `json:"server_addr"`
+	Strict     bool   `json:"strict"` // 严格模式：探测失败时返回错误而非降级
 }
 
 type TLSConfig struct {
 	ServerName         string `json:"server_name"`
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
+
+	// PreferAddressFamily 解析服务端域名时的地址族偏好：
+	//   "auto" (默认) - Happy Eyeballs（IPv6 优先，IPv4 兜底）
+	//   "v4"          - 仅使用 IPv4
+	//   "v6"          - 仅使用 IPv6
+	PreferAddressFamily string `json:"prefer_address_family,omitempty"`
+
+	// HappyEyeballsDelay Happy Eyeballs 算法中两个连接尝试之间的交错延迟。
+	// RFC 8305 推荐 250ms；本项目默认更激进的 50ms，便于双栈环境下快速回退。
+	HappyEyeballsDelay Duration `json:"happy_eyeballs_delay,omitempty"`
 
 	EnablePQC    bool `json:"enable_pqc"`
 	UseSystemCAs bool `json:"use_system_cas"`
@@ -158,6 +190,12 @@ type HTTP3Config struct {
 	Obfs ObfsConfig `json:"obfs,omitempty"`
 	// Congestion 拥塞控制配置（留空使用默认 CUBIC）
 	Congestion CongestionConfig `json:"congestion,omitempty"`
+	
+	// UDP socket buffer 配置（性能优化）
+	UDPRecvBuffer int  `json:"udp_recv_buffer"` // UDP 接收缓冲区大小（字节），默认 16MB
+	UDPSendBuffer int  `json:"udp_send_buffer"` // UDP 发送缓冲区大小（字节），默认 16MB
+	EnableGSO     bool `json:"enable_gso"`      // 启用 GSO/GRO（Linux），默认 true
+	
 	EnableDatagrams      bool     `json:"enable_datagrams"`
 	MaxIdleTimeout       Duration `json:"max_idle_timeout"`
 	KeepAlivePeriod      Duration `json:"keep_alive_period"`
@@ -184,6 +222,14 @@ type ConnectIPConfig struct {
 	// 重连配置
 	EnableReconnect   bool     `json:"enable_reconnect"`    // 默认 true
 	MaxReconnectDelay Duration `json:"max_reconnect_delay"` // 默认 30s
+
+	// 应用层心跳配置
+	AppKeepalivePeriod  Duration `json:"app_keepalive_period"`  // 默认 25s，0 = 禁用
+	AppKeepaliveTimeout Duration `json:"app_keepalive_timeout"` // 默认 30s，单次 ping 等待 pong 的超时
+	UnhealthyThreshold  int      `json:"unhealthy_threshold"`   // 默认 3，连续 N 次 timeout 视为不健康
+
+	// 多 session 独立重连配置
+	PerSessionReconnect bool `json:"per_session_reconnect"` // 默认 true，多 session 独立重连总开关
 
 	// 多 session 并行（企业版特性，开源版固定为 1）
 	// 启用后客户端会并行建立 N 条 CONNECT-IP session，

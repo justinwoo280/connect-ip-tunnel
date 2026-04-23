@@ -3,6 +3,8 @@ package tls
 import (
 	"crypto/x509"
 	"time"
+
+	"connect-ip-tunnel/observability"
 )
 
 // ClientOptions 描述构建 TLS 客户端配置所需的全部参数。
@@ -63,4 +65,6 @@ type ServerOptions struct {
 	SessionCacheSize   int  // Session 缓存大小
 
 	KeyLogPath string // 调试：TLS 密钥日志文件路径
+
+	Metrics *observability.Metrics // Prometheus metrics 实例（可为 nil）
 }

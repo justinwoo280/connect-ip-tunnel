@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"connect-ip-tunnel/common/safe"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
@@ -36,7 +37,9 @@ type sessionStore struct {
 
 func newSessionStore() *sessionStore {
 	s := &sessionStore{data: make(map[string]*session)}
-	go s.gc() // 后台清理过期 session
+	safe.Go("certsrv.session_gc", func() {
+		s.gc()
+	})
 	return s
 }
 
@@ -124,7 +127,9 @@ type rateLimiter struct {
 
 func newRateLimiter() *rateLimiter {
 	rl := &rateLimiter{attempts: make(map[string]*loginAttempt)}
-	go rl.gc()
+	safe.Go("certsrv.ratelimit_gc", func() {
+		rl.gc()
+	})
 	return rl
 }
 
@@ -421,6 +426,8 @@ func (a *authService) ConfirmTOTP(username, secret, code string) error {
 
 func randHex(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("certsrv: randHex: crypto/rand.Read failed: %v", err))
+	}
 	return fmt.Sprintf("%x", b)
 }

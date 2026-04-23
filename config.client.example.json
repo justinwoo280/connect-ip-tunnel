@@ -1,6 +1,8 @@
 {
   "mode": "client",
   "client": {
+    "admin_listen": ":9091",
+    "enable_pprof": false,
     "tun": {
       "name": "tun0",
       "mtu": 1400,
@@ -26,6 +28,9 @@
       "session_cache_size": 128
     },
     "http3": {
+      "udp_recv_buffer": 16777216,
+      "udp_send_buffer": 16777216,
+      "enable_gso": true,
       "enable_datagrams": true,
       "max_idle_timeout": "30s",
       "keep_alive_period": "10s",

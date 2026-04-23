@@ -202,6 +202,12 @@ func (c *linuxConfigurator) Teardown(ifName string) error {
 	return nil
 }
 
+// UpdateAddress 在 Linux 上走通用的 "重新 setup" 兜底路径：
+// ip 命令耗时极低（< 10ms），且 link down/up 不会干扰其它接口的路由。
+func (c *linuxConfigurator) UpdateAddress(prev, next NetworkConfig) error {
+	return updateAddressByReSetup(c, prev, next)
+}
+
 func run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {

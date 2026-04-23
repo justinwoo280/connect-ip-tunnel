@@ -3,6 +3,8 @@ package certsrv
 import (
 	"sync"
 	"time"
+
+	"connect-ip-tunnel/common/safe"
 )
 
 const keyTTL = 10 * time.Minute
@@ -22,7 +24,9 @@ type keyEntry struct {
 
 func newKeyStore() *keyStore {
 	ks := &keyStore{data: make(map[string]keyEntry)}
-	go ks.gc()
+	safe.Go("certsrv.keystore_gc", func() {
+		ks.gc()
+	})
 	return ks
 }
 

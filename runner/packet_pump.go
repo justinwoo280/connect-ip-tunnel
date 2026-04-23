@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connect-ip-tunnel/common/bufferpool"
+	"connect-ip-tunnel/common/safe"
 	"connect-ip-tunnel/platform/tun"
 	"connect-ip-tunnel/tunnel"
 )
@@ -95,7 +96,12 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 	wg.Add(2)
 
 	// TUN → Tunnel
-	go func() {
+	//
+	// 性能说明：热路径的取消语义完全依赖 Read 在 ctx 取消时返回 error
+	// （signalErr 会调用 Tunnel.Close()，TUN 侧关闭由 Engine.Close 兜底）。
+	// 因此循环顶端不再做 `select { case <-pumpCtx.Done(): default: }`
+	// 非阻塞探测 —— 每包省下一次 atomic load + scheduler 唤醒成本。
+	safe.Go("runner.up", func() {
 		defer wg.Done()
 		bufs := make([][]byte, batchSize)
 		for i := range bufs {
@@ -104,12 +110,6 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 		sizes := make([]int, batchSize)
 
 		for {
-			select {
-			case <-pumpCtx.Done():
-				return
-			default:
-			}
-
 			n, err := dev.Read(bufs, sizes, 0)
 			if err != nil {
 				if pumpCtx.Err() != nil {
@@ -136,21 +136,16 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 				p.stats.TxBytes.Add(uint64(sizes[i]))
 			}
 		}
-	}()
+	})
 
 	// Tunnel → TUN
-	go func() {
+	// 同上：去掉每包 select ctx 探测，由 Tunnel.ReadPacket 在 ctx 取消 / Tunnel.Close() 时返回 error。
+	safe.Go("runner.down", func() {
 		defer wg.Done()
 		buf := bufferpool.GetPacket()
 		defer bufferpool.PutPacket(buf)
 
 		for {
-			select {
-			case <-pumpCtx.Done():
-				return
-			default:
-			}
-
 			n, err := p.Tunnel.ReadPacket(buf)
 			if err != nil {
 				if pumpCtx.Err() != nil {
@@ -177,10 +172,10 @@ func (p *PacketPump) runBatch(ctx context.Context, dev interface {
 			p.stats.RxPackets.Add(1)
 			p.stats.RxBytes.Add(uint64(n))
 		}
-	}()
+	})
 
 	select {
-	case <-ctx.Done():
+		case <-ctx.Done():
 		cancel()
 		if !waitWithTimeout(&wg, 2*time.Second) {
 			return ctx.Err()
@@ -220,19 +215,13 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 
 	wg.Add(2)
 
-	// TUN → Tunnel
-	go func() {
+	// TUN → Tunnel —— 与 runBatch 一致，去掉每包 select ctx 探测。
+	safe.Go("runner.up", func() {
 		defer wg.Done()
 		buf := bufferpool.GetPacket()
 		defer bufferpool.PutPacket(buf)
 
 		for {
-			select {
-			case <-pumpCtx.Done():
-				return
-			default:
-			}
-
 			n, err := p.Dev.ReadPacket(buf)
 			if err != nil {
 				if pumpCtx.Err() != nil {
@@ -257,21 +246,15 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 			p.stats.TxPackets.Add(1)
 			p.stats.TxBytes.Add(uint64(n))
 		}
-	}()
+	})
 
-	// Tunnel → TUN
-	go func() {
+	// Tunnel → TUN —— 与 runBatch 一致，去掉每包 select ctx 探测。
+	safe.Go("runner.down", func() {
 		defer wg.Done()
 		buf := bufferpool.GetPacket()
 		defer bufferpool.PutPacket(buf)
 
 		for {
-			select {
-			case <-pumpCtx.Done():
-				return
-			default:
-			}
-
 			n, err := p.Tunnel.ReadPacket(buf)
 			if err != nil {
 				if pumpCtx.Err() != nil {
@@ -296,10 +279,10 @@ func (p *PacketPump) runSingle(ctx context.Context) error {
 			p.stats.RxPackets.Add(1)
 			p.stats.RxBytes.Add(uint64(n))
 		}
-	}()
+	})
 
 	select {
-	case <-ctx.Done():
+		case <-ctx.Done():
 		cancel()
 		if !waitWithTimeout(&wg, 2*time.Second) {
 			return ctx.Err()

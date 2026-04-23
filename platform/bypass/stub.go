@@ -14,7 +14,11 @@ func NewProvider() Provider {
 }
 
 func (p *stubProvider) Build(cfg Config) (Dialer, error) {
-	_ = cfg
+	// 不支持 bypass 的平台
+	if cfg.Strict {
+		return nil, ErrNotImplemented
+	}
+	// 宽松模式：返回一个会失败的 dialer（调用时才报错）
 	return &stubDialer{}, nil
 }
 

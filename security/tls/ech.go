@@ -16,6 +16,8 @@ import (
 "strings"
 "sync"
 "time"
+
+"connect-ip-tunnel/common/safe"
 )
 
 func isECHRejection(err error, out **tls.ECHRejectionError) bool {
@@ -114,23 +116,44 @@ return m.lastFetch.IsZero() || time.Since(m.lastFetch) > m.cacheTTL
 }
 
 func (m *ECHManager) startBackground() {
-go func() {
-ticker := time.NewTicker(30 * time.Minute)
-defer ticker.Stop()
-for {
-select {
-case <-ticker.C:
-m.mu.RLock()
-expired := m.isExpiredLocked()
-m.mu.RUnlock()
-if expired {
-_ = m.Refresh()
-}
-case <-m.stopCh:
-return
-}
-}
-}()
+	safe.Go("ech.refresh", func() {
+		// 动态 backoff：成功时 30 分钟，失败时 5 分钟
+		const (
+			successInterval = 30 * time.Minute
+			failureInterval = 5 * time.Minute
+		)
+		
+		interval := successInterval
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		
+		for {
+			select {
+			case <-timer.C:
+				m.mu.RLock()
+				expired := m.isExpiredLocked()
+				m.mu.RUnlock()
+				
+				if expired {
+					err := m.Refresh()
+					if err != nil {
+						// Refresh 失败，使用短间隔快速重试
+						interval = failureInterval
+					} else {
+						// Refresh 成功，恢复正常间隔
+						interval = successInterval
+					}
+				} else {
+					// 未过期，保持正常间隔
+					interval = successInterval
+				}
+				
+				timer.Reset(interval)
+			case <-m.stopCh:
+				return
+			}
+		}
+	})
 }
 
 const maxDOHResponseSize = 64 * 1024

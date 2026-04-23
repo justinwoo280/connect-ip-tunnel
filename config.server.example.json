@@ -4,6 +4,8 @@
     "listen": ":443",
     "uri_template": "/.well-known/masque/ip",
     "admin_listen": ":9090",
+    "unauthenticated_metrics": true,
+    "enable_pprof": false,
     "tun": {
       "name": "tun0",
       "mtu": 1400
@@ -20,6 +22,9 @@
       "crl_interval": "10m"
     },
     "http3": {
+      "udp_recv_buffer": 16777216,
+      "udp_send_buffer": 16777216,
+      "enable_gso": true,
       "enable_datagrams": true,
       "max_idle_timeout": "60s",
       "keep_alive_period": "20s",
