@@ -65,6 +65,23 @@ func SetBuffers(pc net.PacketConn, want int) (gotRecv, gotSend int) {
 	gotRecv = getActualRecvBuffer(udpConn, want)
 	gotSend = getActualSendBuffer(udpConn, want)
 
+	// 注意：Linux 上内核报告的值是请求值的 2x（含 sk_buff 元数据开销），
+	// 因此即便完全成功，got 也会是 2*want。这里用 want 作为期望对比基线，
+	// 但只把"未达期望一半"视为受系统 cap，避免 Linux 上误警告。
+	const capWarnThreshold = 2 // got < want / capWarnThreshold 视为被 cap
+	if gotRecv > 0 && gotRecv < want/capWarnThreshold {
+		slog.Warn("udpsocket.SetBuffers: receive buffer capped by OS",
+			"want", want,
+			"got_recv", gotRecv,
+			"hint", "Windows/macOS 默认上限较低；Linux 请调整 net.core.rmem_max")
+	}
+	if gotSend > 0 && gotSend < want/capWarnThreshold {
+		slog.Warn("udpsocket.SetBuffers: send buffer capped by OS",
+			"want", want,
+			"got_send", gotSend,
+			"hint", "Windows/macOS 默认上限较低；Linux 请调整 net.core.wmem_max")
+	}
+
 	slog.Info("udpsocket.SetBuffers: configured UDP socket buffers",
 		"want", want,
 		"got_recv", gotRecv,

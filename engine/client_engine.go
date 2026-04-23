@@ -156,6 +156,12 @@ func (e *Engine) Start() error {
 			MaxStreamReceiveWindow:         uint64(e.cfg.HTTP3.MaxStreamWindow),
 			InitialConnectionReceiveWindow: uint64(e.cfg.HTTP3.InitialConnWindow),
 			MaxConnectionReceiveWindow:     uint64(e.cfg.HTTP3.MaxConnWindow),
+			// UDP socket buffer（性能调优，主要在 Linux 上有效；Windows/macOS 会被系统 cap）
+			UDPRecvBuffer:       e.cfg.HTTP3.UDPRecvBuffer,
+			UDPSendBuffer:       e.cfg.HTTP3.UDPSendBuffer,
+			EnableGSO:           e.cfg.HTTP3.IsGSOEnabled(),
+			PreferAddressFamily: e.cfg.TLS.PreferAddressFamily,
+			HappyEyeballsDelay:  e.cfg.TLS.HappyEyeballsDelay.Duration,
 		}
 		e.h3Factory = h3transport.NewFactory(h3Opts, e.tlsClient, e.bpDialer)
 
@@ -218,7 +224,7 @@ func (e *Engine) runLoop(ctx context.Context) {
 
 		log.Printf("[engine] session ended: %v", err)
 
-		if !e.cfg.ConnectIP.EnableReconnect {
+		if !e.cfg.ConnectIP.IsReconnectEnabled() {
 			log.Printf("[engine] reconnect disabled, stopping")
 			return
 		}
@@ -336,7 +342,7 @@ func (e *Engine) connectAndRunMulti(ctx context.Context, n int) error {
 	}
 
 	// 检查是否启用独立重连
-	if e.cfg.ConnectIP.PerSessionReconnect {
+	if e.cfg.ConnectIP.IsPerSessionReconnectEnabled() {
 		return e.connectAndRunMultiIndependent(ctx, n, dialFn)
 	}
 	

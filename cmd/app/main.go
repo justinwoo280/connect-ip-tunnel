@@ -54,6 +54,10 @@ func main() {
 		log.Fatalf("load config failed: %v", err)
 	}
 
+	// 让 EnableGSO=false 真正生效：通过 quic-go 的环境变量关闭发送方 GSO 路径。
+	// 客户端 / 服务端共用一个进程，按当前模式取对应配置。
+	applyGSOPreference(cfg)
+
 	log.Printf("connect-ip-tunnel %s starting in %s mode", Version, cfg.Mode)
 
 	// 根据模式启动客户端或服务端
@@ -61,6 +65,23 @@ func main() {
 		runClient(cfg.Client)
 	} else {
 		runServer(cfg.Server)
+	}
+}
+
+// applyGSOPreference 把用户的 EnableGSO 配置映射到 quic-go 的
+// QUIC_GO_DISABLE_GSO 环境变量。仅 Linux 真正受影响；其他平台
+// quic-go 会自动按内核能力降级，env 设置无副作用。
+func applyGSOPreference(cfg option.Config) {
+	var enabled bool
+	if cfg.Mode == option.ModeServer {
+		enabled = cfg.Server.HTTP3.IsGSOEnabled()
+	} else {
+		enabled = cfg.Client.HTTP3.IsGSOEnabled()
+	}
+	if !enabled {
+		// quic-go 在 sendconn 初始化时读取此变量；非空字符串表示禁用。
+		_ = os.Setenv("QUIC_GO_DISABLE_GSO", "true")
+		log.Printf("[main] EnableGSO=false → set QUIC_GO_DISABLE_GSO=true")
 	}
 }
 

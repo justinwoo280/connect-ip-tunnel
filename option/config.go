@@ -125,6 +125,16 @@ type CertSrvConfig struct {
 	TrustedProxy bool `json:"trusted_proxy"`
 }
 
+// TUNConfig 描述 TUN 设备的创建与寻址参数。
+//
+// 跨平台行为差异：
+//   - Linux  : Name 直接作为接口名（如 "tun0"）；FileDescriptor 用于 NetworkManager
+//              托管场景，可传入已 open 的 fd。
+//   - macOS  : Name 必须形如 "utun*"，否则系统会拒绝创建。留空则由内核分配下一个可用号。
+//   - Windows: 使用 wintun 驱动，Name 仅作为偏好的适配器别名（同名已存在时会被复用），
+//              真实接口名最终以系统注册表里的 wintun 实例为准。
+//   - FreeBSD: Name 同 Linux 语义。
+//   - Android: 必须传入 FileDescriptor（来自 VPNService），Name/MTU 仅作日志记录。
 type TUNConfig struct {
 	Name           string `json:"name"`
 	MTU            int    `json:"mtu"`
@@ -194,20 +204,28 @@ type HTTP3Config struct {
 	// UDP socket buffer 配置（性能优化）
 	UDPRecvBuffer int  `json:"udp_recv_buffer"` // UDP 接收缓冲区大小（字节），默认 16MB
 	UDPSendBuffer int  `json:"udp_send_buffer"` // UDP 发送缓冲区大小（字节），默认 16MB
-	EnableGSO     bool `json:"enable_gso"`      // 启用 GSO/GRO（Linux），默认 true
+	// EnableGSO 启用 GSO/GRO（仅 Linux 真正生效；其他平台 quic-go 自动降级）。
+	// 默认 nil = true（启用）。显式写 false 通过 QUIC_GO_DISABLE_GSO 环境变量
+	// 关闭 quic-go 内的发送方 GSO 路径（用于排障 / 兼容旧内核）。
+	EnableGSO *bool `json:"enable_gso,omitempty"`
 	
-	EnableDatagrams      bool     `json:"enable_datagrams"`
-	MaxIdleTimeout       Duration `json:"max_idle_timeout"`
-	KeepAlivePeriod      Duration `json:"keep_alive_period"`
-	Allow0RTT            bool     `json:"allow_0rtt"`
-	DisablePathMTUProbe  bool     `json:"disable_path_mtu_probe"`
-	InitialStreamWindow  int64    `json:"initial_stream_window"`
-	MaxStreamWindow      int64    `json:"max_stream_window"`
-	InitialConnWindow    int64    `json:"initial_conn_window"`
-	MaxConnWindow        int64    `json:"max_conn_window"`
-	DisableCompression   bool     `json:"disable_compression"`
-	TLSHandshakeTimeout  Duration `json:"tls_handshake_timeout"`
-	MaxResponseHeaderSec int      `json:"max_response_header_sec"`
+	EnableDatagrams bool     `json:"enable_datagrams"`
+	MaxIdleTimeout  Duration `json:"max_idle_timeout"`
+	KeepAlivePeriod Duration `json:"keep_alive_period"`
+	Allow0RTT       bool     `json:"allow_0rtt"`
+	// DisablePathMTUProbe 关闭 quic-go 的路径 MTU 探测。
+	// 跨平台说明：探测依赖 ICMP "Frag Needed"/"Packet Too Big" 响应；
+	// 在 Windows 上若防火墙过滤了入向 ICMPv6，会出现长时间停顿后回退到保守 MTU。
+	// 遇到这种症状时可临时设为 true（保守 MTU=1252），但损失约 5-10% 吞吐。
+	DisablePathMTUProbe bool  `json:"disable_path_mtu_probe"`
+	InitialStreamWindow int64 `json:"initial_stream_window"`
+	MaxStreamWindow     int64 `json:"max_stream_window"`
+	InitialConnWindow   int64 `json:"initial_conn_window"`
+	MaxConnWindow       int64 `json:"max_conn_window"`
+	// 注意：以下 3 个字段（disable_compression / tls_handshake_timeout / max_response_header_sec）
+	// 已于 2026-04 移除 —— CONNECT-IP 走 datagram + capsule 路径，没有独立 HTTP 响应头与
+	// HTTP 压缩协商，quic-go 也不暴露相应钩子，留着只会误导用户。配置文件里残留这些 key
+	// 由 Go 的 json 解码器静默忽略（无 json 标签命中），向后兼容。
 }
 
 type ConnectIPConfig struct {
@@ -220,7 +238,8 @@ type ConnectIPConfig struct {
 	AddressAssignTimeout Duration `json:"address_assign_timeout"`  // 默认 30s
 
 	// 重连配置
-	EnableReconnect   bool     `json:"enable_reconnect"`    // 默认 true
+	// EnableReconnect 默认 nil = true（启用断线自动重连）；显式写 false 可禁用。
+	EnableReconnect   *bool    `json:"enable_reconnect,omitempty"`
 	MaxReconnectDelay Duration `json:"max_reconnect_delay"` // 默认 30s
 
 	// 应用层心跳配置
@@ -229,15 +248,44 @@ type ConnectIPConfig struct {
 	UnhealthyThreshold  int      `json:"unhealthy_threshold"`   // 默认 3，连续 N 次 timeout 视为不健康
 
 	// 多 session 独立重连配置
-	PerSessionReconnect bool `json:"per_session_reconnect"` // 默认 true，多 session 独立重连总开关
+	// 默认 nil = true（启用）；显式写 false 时退化到 all-or-nothing 重连模式。
+	PerSessionReconnect *bool `json:"per_session_reconnect,omitempty"`
 
-	// 多 session 并行（企业版特性，开源版固定为 1）
+	// 多 session 并行（默认 1，建议设为 CPU 核数或带宽瓶颈数）。
 	// 启用后客户端会并行建立 N 条 CONNECT-IP session，
 	// 按五元组哈希分发上行包，充分利用多核与多连接带宽。
-	NumSessions int `json:"num_sessions"` // 默认 1；建议设为 CPU 核数或带宽瓶颈数
+	// 实际生效的并发上限受 quic-go transport 池大小限制。
+	NumSessions int `json:"num_sessions"`
 }
 
+// boolPtr 返回指向 b 的指针，便于在配置初始化时显式赋值。
+func boolPtr(b bool) *bool { return &b }
 
+// IsReconnectEnabled 报告 EnableReconnect 是否启用：
+// nil（未配置） → true（默认启用）；非 nil → 取指针值。
+func (c ConnectIPConfig) IsReconnectEnabled() bool {
+	if c.EnableReconnect == nil {
+		return true
+	}
+	return *c.EnableReconnect
+}
+
+// IsPerSessionReconnectEnabled 同 IsReconnectEnabled 语义。
+func (c ConnectIPConfig) IsPerSessionReconnectEnabled() bool {
+	if c.PerSessionReconnect == nil {
+		return true
+	}
+	return *c.PerSessionReconnect
+}
+
+// IsGSOEnabled 报告 EnableGSO 是否启用：默认 true，显式 false 会通过
+// QUIC_GO_DISABLE_GSO 环境变量传给 quic-go。
+func (h HTTP3Config) IsGSOEnabled() bool {
+	if h.EnableGSO == nil {
+		return true
+	}
+	return *h.EnableGSO
+}
 
 // ObfsConfig UDP 包级别混淆配置
 type ObfsConfig struct {

@@ -2,8 +2,58 @@ package option
 
 import (
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 )
+
+// 已知合法值集合（供 validate 校验，避免用户拼写错误时静默回退到默认）。
+var (
+	validCongestionAlgos = map[string]struct{}{
+		"":      {}, // 留空 = 默认 cubic
+		"cubic": {},
+		"bbr2":  {},
+	}
+	validObfsTypes = map[string]struct{}{
+		"":           {}, // 留空 = 不启用混淆
+		"salamander": {},
+	}
+)
+
+// validateHTTP3Common 抽出客户端 / 服务端共用的 HTTP3 字段校验逻辑。
+// 不返回错误的字段（如 obfs 参数）使用 slog.Warn 提示，便于排障但不阻断启动。
+func validateHTTP3Common(scope string, h HTTP3Config) error {
+	algo := strings.ToLower(strings.TrimSpace(h.Congestion.Algorithm))
+	if _, ok := validCongestionAlgos[algo]; !ok {
+		return fmt.Errorf("%s: http3.congestion.algorithm must be one of cubic/bbr2, got %q", scope, h.Congestion.Algorithm)
+	}
+
+	obfsType := strings.ToLower(strings.TrimSpace(h.Obfs.Type))
+	if _, ok := validObfsTypes[obfsType]; !ok {
+		return fmt.Errorf("%s: http3.obfs.type must be salamander or empty, got %q", scope, h.Obfs.Type)
+	}
+	if obfsType != "" && h.Obfs.Password == "" {
+		return fmt.Errorf("%s: http3.obfs.password is required when obfs.type=%q", scope, h.Obfs.Type)
+	}
+
+	// 窗口一致性提示
+	if h.MaxStreamWindow > 0 && h.InitialStreamWindow > 0 &&
+		h.MaxStreamWindow < h.InitialStreamWindow {
+		slog.Warn("http3 window misconfigured: max_stream_window < initial_stream_window, will be auto-promoted",
+			"scope", scope,
+			"max", h.MaxStreamWindow,
+			"initial", h.InitialStreamWindow)
+	}
+	if h.MaxConnWindow > 0 && h.InitialConnWindow > 0 &&
+		h.MaxConnWindow < h.InitialConnWindow {
+		slog.Warn("http3 window misconfigured: max_conn_window < initial_conn_window, will be auto-promoted",
+			"scope", scope,
+			"max", h.MaxConnWindow,
+			"initial", h.InitialConnWindow)
+	}
+
+	return nil
+}
 
 // ApplyDefaults 应用默认值
 func (c *Config) ApplyDefaults() {
@@ -63,9 +113,12 @@ func (c *ClientConfig) ApplyDefaults() {
 	if c.HTTP3.UDPSendBuffer <= 0 {
 		c.HTTP3.UDPSendBuffer = 16 * 1024 * 1024 // 16 MB
 	}
-	// GSO/GRO 默认启用（Linux 上有效，其他平台 noop）
-	c.HTTP3.EnableGSO = true
-	
+	// GSO/GRO 默认启用（Linux 上有效，其他平台 noop）。
+	// 注意：此处只在用户未显式配置时填充默认，不再无条件覆盖。
+	if c.HTTP3.EnableGSO == nil {
+		c.HTTP3.EnableGSO = boolPtr(true)
+	}
+
 	if c.TLS.SessionCacheSize <= 0 {
 		c.TLS.SessionCacheSize = 128
 	}
@@ -81,8 +134,10 @@ func (c *ClientConfig) ApplyDefaults() {
 	if c.ConnectIP.AddressAssignTimeout.Duration == 0 {
 		c.ConnectIP.AddressAssignTimeout = Duration{30 * time.Second}
 	}
-	// 重连默认启用
-	c.ConnectIP.EnableReconnect = true
+	// 重连默认启用：仅当用户未显式配置时填默认 true，不再覆盖用户的 false。
+	if c.ConnectIP.EnableReconnect == nil {
+		c.ConnectIP.EnableReconnect = boolPtr(true)
+	}
 	if c.ConnectIP.MaxReconnectDelay.Duration == 0 {
 		c.ConnectIP.MaxReconnectDelay = Duration{30 * time.Second}
 	}
@@ -96,8 +151,10 @@ func (c *ClientConfig) ApplyDefaults() {
 	if c.ConnectIP.UnhealthyThreshold <= 0 {
 		c.ConnectIP.UnhealthyThreshold = 3
 	}
-	// 多 session 独立重连默认启用
-	c.ConnectIP.PerSessionReconnect = true
+	// 多 session 独立重连默认启用：同样只在 nil 时填默认。
+	if c.ConnectIP.PerSessionReconnect == nil {
+		c.ConnectIP.PerSessionReconnect = boolPtr(true)
+	}
 	// QUIC 流控窗口：未配置时使用面向高带宽的默认值
 	if c.HTTP3.InitialStreamWindow <= 0 {
 		c.HTTP3.InitialStreamWindow = defaultInitialStreamWindow
@@ -134,6 +191,26 @@ func (c *ClientConfig) Validate() error {
 	default:
 		return fmt.Errorf("client: tls.prefer_address_family must be one of auto/v4/v6, got %q", c.TLS.PreferAddressFamily)
 	}
+
+	// HTTP3 公共校验（congestion / obfs / window 一致性）
+	if err := validateHTTP3Common("client", c.HTTP3); err != nil {
+		return err
+	}
+
+	// EnablePprof 仅在 AdminListen 启用时有意义
+	if c.EnablePprof && c.AdminListen == "" {
+		slog.Warn("client.enable_pprof=true but admin_listen is empty; pprof endpoint will not be served")
+	}
+
+	// num_sessions 越界提示（不阻断启动）
+	if c.ConnectIP.NumSessions < 0 {
+		return fmt.Errorf("client: connect_ip.num_sessions must be >= 0 (0/1 = single session)")
+	}
+	if c.ConnectIP.NumSessions > 32 {
+		slog.Warn("client.connect_ip.num_sessions > 32 is unusual and may exhaust file descriptors",
+			"num_sessions", c.ConnectIP.NumSessions)
+	}
+
 	return nil
 }
 
@@ -161,9 +238,11 @@ func (s *ServerConfig) ApplyDefaults() {
 	if s.HTTP3.UDPSendBuffer <= 0 {
 		s.HTTP3.UDPSendBuffer = 16 * 1024 * 1024 // 16 MB
 	}
-	// GSO/GRO 默认启用（Linux 上有效，其他平台 noop）
-	s.HTTP3.EnableGSO = true
-	
+	// GSO/GRO 默认启用：仅在用户未显式配置时填默认。
+	if s.HTTP3.EnableGSO == nil {
+		s.HTTP3.EnableGSO = boolPtr(true)
+	}
+
 	if s.TLS.SessionCacheSize <= 0 {
 		s.TLS.SessionCacheSize = 256
 	}
@@ -215,6 +294,17 @@ func (s *ServerConfig) Validate() error {
 	if s.AdminListen != "" && !isLoopback(s.AdminListen) && s.AdminToken == "" {
 		return fmt.Errorf("server: admin_token is required when admin_listen is not a loopback address")
 	}
+
+	// HTTP3 公共校验
+	if err := validateHTTP3Common("server", s.HTTP3); err != nil {
+		return err
+	}
+
+	// EnablePprof 仅在 AdminListen 启用时有意义
+	if s.EnablePprof && s.AdminListen == "" {
+		slog.Warn("server.enable_pprof=true but admin_listen is empty; pprof endpoint will not be served")
+	}
+
 	return nil
 }
 

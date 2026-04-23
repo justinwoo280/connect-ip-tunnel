@@ -12,7 +12,7 @@ func DefaultConfig() ClientConfig {
 		ConnectIP: ConnectIPConfig{
 			URI:                  "https://localhost/.well-known/masque/ip",
 			WaitForAddressAssign: true,
-			EnableReconnect:      true,
+			EnableReconnect:      boolPtr(true),
 		},
 		HTTP3: HTTP3Config{
 			EnableDatagrams: true,
