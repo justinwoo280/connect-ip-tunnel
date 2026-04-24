@@ -1,7 +1,8 @@
 {
+  "_comment_admin_listen": "客户端管理 API 默认仅本机访问；GUI 通过 127.0.0.1 即可。",
   "mode": "client",
   "client": {
-    "admin_listen": ":9091",
+    "admin_listen": "127.0.0.1:9091",
     "enable_pprof": false,
     "tun": {
       "name": "tun0",
@@ -15,7 +16,8 @@
     },
     "tls": {
       "server_name": "proxy.example.com",
-      "insecure_skip_verify": false,
+      "_comment_trust_anchor": "信任锚优先级: server_ca_file > use_mozilla_ca > use_system_cas. 企业内网部署推荐 server_ca_file 指向 certsrv 签发的 ca.crt.",
+      "server_ca_file": "/etc/connect-ip-tunnel/certs/ca.crt",
       "client_cert_file": "/etc/connect-ip-tunnel/certs/client.crt",
       "client_key_file": "/etc/connect-ip-tunnel/certs/client.key",
       "enable_pqc": true,

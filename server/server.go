@@ -221,8 +221,10 @@ func (s *Server) Start() error {
 			ClientCAFile:       s.cfg.TLS.ClientCAFile,
 			CRLUrl:             s.cfg.TLS.CRLUrl,
 			CRLInterval:        s.cfg.TLS.CRLInterval.Duration,
+			RequireCRL:         s.cfg.TLS.RequireCRL,
 			EnableSessionCache: s.cfg.TLS.EnableSessionCache,
 			SessionCacheSize:   s.cfg.TLS.SessionCacheSize,
+			KeyLogPath:         s.cfg.TLS.KeyLogPath,
 			Metrics:            s.metrics, // 传递 metrics 实例
 		})
 		if err != nil {

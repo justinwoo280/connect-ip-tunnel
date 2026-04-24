@@ -13,7 +13,11 @@ import (
 func TestEngineConfigLoadAndStop(t *testing.T) {
 	cfg := option.DefaultConfig()
 	cfg.ConnectIP.Addr = "127.0.0.1:4433"
-	cfg.TLS.InsecureSkipVerify = true
+	// 安全约束：客户端必须验证服务端证书，没有跳过开关。
+	// 烟测里使用系统根证书池作为信任锚（足以让 buildTLSOptions 通过初始化）。
+	// Start() 会在 connectip.Dial 阶段失败（127.0.0.1:4433 无服务端），
+	// 但 TUN/TLS/bypass 等初始化路径已被覆盖。
+	cfg.TLS.UseSystemCAs = true
 	cfg.Bypass.Enable = false
 	// TUN FileDescriptor = 0 → 平台层会尝试创建真实 TUN，在 CI 中可能失败，
 	// 此处仅验证 New() 不报错。

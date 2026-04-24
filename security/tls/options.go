@@ -8,15 +8,20 @@ import (
 )
 
 // ClientOptions 描述构建 TLS 客户端配置所需的全部参数。
+//
+// 安全原则：客户端必须验证服务端证书，没有"跳过验证"开关。
+// 信任锚通过 RootCAs / UseMozillaCA / UseSystemCAs 三选一指定。
+// 这是一个有意为之的硬约束：即使在开发环境，也应使用 server_ca_file 指向自签 CA，
+// 而不是关闭证书校验。
 type ClientOptions struct {
-	ServerName         string
-	NextProtos         []string
-	InsecureSkipVerify bool
+	ServerName string
+	NextProtos []string
 
 	// PQC：启用后在 CurvePreferences 首位插入 X25519MLKEM768
 	EnablePQC bool
 
 	// CA 证书来源（优先级：RootCAs > UseMozillaCA > UseSystemCAs > nil）
+	// 三者均未设置时使用 Go 默认行为（系统根证书）。
 	UseSystemCAs bool
 	UseMozillaCA bool
 	RootCAs      *x509.CertPool
@@ -60,6 +65,12 @@ type ServerOptions struct {
 	// 设置后服务端会定时从该 URL 拉取 CRL，并在 mTLS 握手时检查客户端证书是否被吊销
 	CRLUrl      string        // CRL PEM 文件的 HTTP(S) URL，例如 http://certsrv:8443/crl.pem
 	CRLInterval time.Duration // CRL 拉取间隔，默认 10 分钟
+
+	// RequireCRL 严格模式：CRL 必须可用才允许 TLS 握手通过。
+	// false (默认): 宽松模式，CRL 未拉取成功时放行连接，避免 certsrv 启动慢导致主服务无法接客（向后兼容）
+	// true: 严格模式，CRL 拉取成功前所有 mTLS 握手都被拒绝；CRL 拉取失败超过宽限期后已建立连接也会被拒
+	// 生产环境强烈建议开启 true，配合 certsrv 的高可用部署。
+	RequireCRL bool
 
 	EnableSessionCache bool // 启用 TLS session 缓存
 	SessionCacheSize   int  // Session 缓存大小

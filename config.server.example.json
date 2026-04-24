@@ -1,10 +1,12 @@
 {
+  "_comment_admin_listen": "管理 API 监听地址。生产部署强烈建议保持 127.0.0.1:9090（仅本机访问）；如需远程访问请配合 admin_token 与反向代理（nginx mTLS / SSH 隧道）。",
+  "_comment_metrics_auth": "unauthenticated_metrics=false 时，/metrics 路径需带 admin_token 才能访问，避免暴露内部拓扑/吞吐数据给第三方。",
   "mode": "server",
   "server": {
     "listen": ":443",
     "uri_template": "/.well-known/masque/ip",
-    "admin_listen": ":9090",
-    "unauthenticated_metrics": true,
+    "admin_listen": "127.0.0.1:9090",
+    "unauthenticated_metrics": false,
     "enable_pprof": false,
     "tun": {
       "name": "tun0",
@@ -19,7 +21,9 @@
       "enable_session_cache": true,
       "session_cache_size": 256,
       "crl_url": "https://127.0.0.1:8443/crl.pem",
-      "crl_interval": "10m"
+      "crl_interval": "10m",
+      "_comment_require_crl": "true=严格模式（生产推荐），CRL 拉取成功前拒绝所有 mTLS 握手。请确保 certsrv 与主服务同时启动并 reachable。",
+      "require_crl": false
     },
     "http3": {
       "udp_recv_buffer": 16777216,
@@ -46,7 +50,8 @@
     "enable_nat": true,
     "nat_interface": "",
     "certsrv": {
-      "listen": ":8443",
+      "_comment_listen": "CertSrv 默认仅本机访问（管理员通过 SSH 隧道转发后访问）；如需远程，请前置 nginx + 客户端证书 / SSO。",
+      "listen": "127.0.0.1:8443",
       "db_path": "/etc/connect-ip-tunnel/certsrv.db",
       "ca_cert_file": "/etc/connect-ip-tunnel/certs/ca.crt",
       "ca_key_file": "/etc/connect-ip-tunnel/certs/ca.key"

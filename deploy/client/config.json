@@ -7,7 +7,7 @@
     },
     "tls": {
       "server_name":        "server.connect-ip.local",
-      "insecure_skip_verify": false,
+      "server_ca_file":     "/etc/connect-ip-tunnel/certs/ca.crt",
       "client_cert_file":   "/etc/connect-ip-tunnel/certs/client.crt",
       "client_key_file":    "/etc/connect-ip-tunnel/certs/client.key",
       "enable_pqc":         true,

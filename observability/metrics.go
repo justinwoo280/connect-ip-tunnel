@@ -327,10 +327,13 @@ func (m *Metrics) RecordSessionError(reason string) {
 
 // AddRx 记录上行流量（client → server）。
 // cn 是客户端证书的 CN（Common Name），用于可选的 per-CN 统计。
+//
+// 性能提示：在热路径（每包调用）的场景，建议使用 SessionMetrics 一次性绑定 cn，
+// 之后每包只调 SessionMetrics.AddRx(bytes) 避免每次 WithLabelValues map 查找。
 func (m *Metrics) AddRx(cn string, bytes int) {
 	m.BytesRx.Add(float64(bytes))
 	m.PacketsRx.Inc()
-	
+
 	// 如果启用了 per-CN 统计，同时记录到 BytesByCN/PacketsByCN
 	if m.BytesByCN != nil {
 		m.BytesByCN.WithLabelValues(cn).Add(float64(bytes))
@@ -342,16 +345,74 @@ func (m *Metrics) AddRx(cn string, bytes int) {
 
 // AddTx 记录下行流量（server → client）。
 // cn 是客户端证书的 CN（Common Name），用于可选的 per-CN 统计。
+//
+// 性能提示：在热路径（每包调用）的场景，建议使用 SessionMetrics 一次性绑定 cn，
+// 之后每包只调 SessionMetrics.AddTx(bytes) 避免每次 WithLabelValues map 查找。
 func (m *Metrics) AddTx(cn string, bytes int) {
 	m.BytesTx.Add(float64(bytes))
 	m.PacketsTx.Inc()
-	
+
 	// 如果启用了 per-CN 统计，同时记录到 BytesByCN/PacketsByCN
 	if m.BytesByCN != nil {
 		m.BytesByCN.WithLabelValues(cn).Add(float64(bytes))
 	}
 	if m.PacketsByCN != nil {
 		m.PacketsByCN.WithLabelValues(cn).Inc()
+	}
+}
+
+// SessionMetrics 是为单个会话/客户端预先绑定的 metric 句柄集。
+// 会话建立时调用 ForSession(cn) 一次性解析 label，之后热路径调用 AddRx/AddTx 不再有 map 查找开销。
+//
+// 当 per-CN metrics 未启用（EnablePerCNMetrics 未调用）时，bytesByCN/packetsByCN 为 nil，
+// 该结构退化为对全局 Counter 的 wrapper，相对原 AddRx/AddTx 仍能省去 nil 检查的分支预测开销。
+type SessionMetrics struct {
+	bytesRx     prometheus.Counter
+	packetsRx   prometheus.Counter
+	bytesTx     prometheus.Counter
+	packetsTx   prometheus.Counter
+	bytesByCN   prometheus.Counter // nil 表示 per-CN metrics 未启用
+	packetsByCN prometheus.Counter // nil 表示 per-CN metrics 未启用
+}
+
+// ForSession 为指定 CN 创建一个预绑定的 SessionMetrics 句柄。
+// cn 为空时使用 "_unknown" 占位。返回值在 session 生命周期内复用，热路径中无需再做 nil 检查。
+func (m *Metrics) ForSession(cn string) *SessionMetrics {
+	if cn == "" {
+		cn = "_unknown"
+	}
+	sm := &SessionMetrics{
+		bytesRx:   m.BytesRx,
+		packetsRx: m.PacketsRx,
+		bytesTx:   m.BytesTx,
+		packetsTx: m.PacketsTx,
+	}
+	if m.BytesByCN != nil {
+		sm.bytesByCN = m.BytesByCN.WithLabelValues(cn)
+	}
+	if m.PacketsByCN != nil {
+		sm.packetsByCN = m.PacketsByCN.WithLabelValues(cn)
+	}
+	return sm
+}
+
+// AddRx 记录上行字节数（热路径调用，无 map 查找）。
+func (sm *SessionMetrics) AddRx(bytes int) {
+	sm.bytesRx.Add(float64(bytes))
+	sm.packetsRx.Inc()
+	if sm.bytesByCN != nil {
+		sm.bytesByCN.Add(float64(bytes))
+		sm.packetsByCN.Inc()
+	}
+}
+
+// AddTx 记录下行字节数（热路径调用，无 map 查找）。
+func (sm *SessionMetrics) AddTx(bytes int) {
+	sm.bytesTx.Add(float64(bytes))
+	sm.packetsTx.Inc()
+	if sm.bytesByCN != nil {
+		sm.bytesByCN.Add(float64(bytes))
+		sm.packetsByCN.Inc()
 	}
 }
 

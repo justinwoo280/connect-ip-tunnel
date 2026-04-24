@@ -8,6 +8,14 @@ import (
 	"connect-ip-tunnel/observability"
 )
 
+// recordPanic 在 observability.Global 已注册时记录一次 panic 计数。
+// 在测试或 metrics 尚未初始化的场景下安全 no-op。
+func recordPanic(component string) {
+	if g := observability.Global; g != nil && g.Panics != nil {
+		g.Panics.WithLabelValues(component).Inc()
+	}
+}
+
 // Go starts a goroutine that recovers from panics.
 // component is used for metric labels and logging.
 func Go(component string, fn func()) {
@@ -18,7 +26,7 @@ func Go(component string, fn func()) {
 					"component", component,
 					"err", r,
 					"stack", string(debug.Stack()))
-				observability.Global.Panics.WithLabelValues(component).Inc()
+				recordPanic(component)
 			}
 		}()
 		fn()
@@ -35,7 +43,7 @@ func HTTP(component string, next http.Handler) http.Handler {
 					"path", r.URL.Path,
 					"err", rec,
 					"stack", string(debug.Stack()))
-				observability.Global.Panics.WithLabelValues(component).Inc()
+				recordPanic(component)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
 		}()

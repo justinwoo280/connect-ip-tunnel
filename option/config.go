@@ -152,8 +152,7 @@ type BypassConfig struct {
 }
 
 type TLSConfig struct {
-	ServerName         string `json:"server_name"`
-	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
+	ServerName string `json:"server_name"`
 
 	// PreferAddressFamily 解析服务端域名时的地址族偏好：
 	//   "auto" (默认) - Happy Eyeballs（IPv6 优先，IPv4 兜底）
@@ -168,6 +167,17 @@ type TLSConfig struct {
 	EnablePQC    bool `json:"enable_pqc"`
 	UseSystemCAs bool `json:"use_system_cas"`
 	UseMozillaCA bool `json:"use_mozilla_ca"`
+
+	// ServerCAFile 客户端用：信任的服务端根 CA 证书 PEM 文件路径（PEM 格式，可包含多个证书）。
+	// 设置后，客户端只信任由该 CA 签发的服务端证书。优先级最高（高于 use_mozilla_ca / use_system_cas）。
+	// 企业内网 mTLS 部署的推荐做法：用 certsrv 签发 server.crt 和 ca.crt，
+	// 把 ca.crt 路径配在这里，即可保证 TLS 握手只信任本组织 CA，杜绝 MITM。
+	ServerCAFile string `json:"server_ca_file,omitempty"`
+
+	// InsecureSkipVerifyDeprecated 已废弃字段，保留仅用于检测并报错。
+	// 旧版本曾允许客户端跳过服务端证书验证；该选项不再支持，配置中出现 true 将拒绝启动。
+	// 正确做法：用 server_ca_file 指向自签 CA 的 PEM；公网证书可设 use_mozilla_ca 或 use_system_cas。
+	InsecureSkipVerifyDeprecated *bool `json:"insecure_skip_verify,omitempty"`
 
 	// ECH（Encrypted Client Hello）- 客户端
 	EnableECH     bool   `json:"enable_ech"`
@@ -188,6 +198,10 @@ type TLSConfig struct {
 	// CRL（证书吊销列表）— 服务端 mTLS 模式下使用
 	CRLUrl      string   `json:"crl_url,omitempty"`      // CRL PEM 的 HTTP(S) URL
 	CRLInterval Duration `json:"crl_interval,omitempty"` // 拉取间隔，默认 10m，支持 "10m"/"1h" 字符串
+	// RequireCRL 服务端 mTLS 严格模式：CRL 必须可用才允许 TLS 握手通过。
+	// false (默认): 宽松模式，CRL 未拉取成功时放行，避免 certsrv 启动慢导致主服务无法接客（向后兼容）
+	// true: 严格模式，CRL 拉取成功前所有 mTLS 握手都被拒绝。生产环境强烈建议开启 true。
+	RequireCRL bool `json:"require_crl,omitempty"`
 
 	EnableSessionCache bool   `json:"enable_session_cache"`
 	SessionCacheSize   int    `json:"session_cache_size"`

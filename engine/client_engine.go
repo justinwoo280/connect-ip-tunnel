@@ -3,15 +3,18 @@ package engine
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,7 +120,12 @@ func (e *Engine) Start() error {
 
 		// 3. 构建 TLS
 		tlsProvider := securitytls.NewProvider()
-		tlsClient, err := tlsProvider.NewClient(context.Background(), e.buildTLSOptions())
+		tlsOpts, err := e.buildTLSOptions()
+		if err != nil {
+			startErr = fmt.Errorf("engine: build tls options: %w", err)
+			return
+		}
+		tlsClient, err := tlsProvider.NewClient(context.Background(), tlsOpts)
 		if err != nil {
 			startErr = fmt.Errorf("engine: init tls client: %w", err)
 			return
@@ -984,17 +992,16 @@ func (e *Engine) configureTUNStatic() error {
 }
 
 // buildTLSOptions 构建 TLS 选项（复用于多处）。
-func (e *Engine) buildTLSOptions() securitytls.ClientOptions {
-	return securitytls.ClientOptions{
-		ServerName:         e.cfg.TLS.ServerName,
-		NextProtos:         []string{"h3"},
-		InsecureSkipVerify: e.cfg.TLS.InsecureSkipVerify,
-		EnableECH:          e.cfg.TLS.EnableECH,
-		ECHConfigList:      e.cfg.TLS.ECHConfigList,
-		ECHManager:         e.echMgr,
-		EnablePQC:          e.cfg.TLS.EnablePQC,
-		UseSystemCAs:       e.cfg.TLS.UseSystemCAs,
-		UseMozillaCA:       e.cfg.TLS.UseMozillaCA,
+func (e *Engine) buildTLSOptions() (securitytls.ClientOptions, error) {
+	opts := securitytls.ClientOptions{
+		ServerName:    e.cfg.TLS.ServerName,
+		NextProtos:    []string{"h3"},
+		EnableECH:     e.cfg.TLS.EnableECH,
+		ECHConfigList: e.cfg.TLS.ECHConfigList,
+		ECHManager:    e.echMgr,
+		EnablePQC:     e.cfg.TLS.EnablePQC,
+		UseSystemCAs:  e.cfg.TLS.UseSystemCAs,
+		UseMozillaCA:  e.cfg.TLS.UseMozillaCA,
 		// mTLS 客户端证书配置
 		ClientCertFile:     e.cfg.TLS.ClientCertFile,
 		ClientKeyFile:      e.cfg.TLS.ClientKeyFile,
@@ -1002,6 +1009,31 @@ func (e *Engine) buildTLSOptions() securitytls.ClientOptions {
 		SessionCacheSize:   e.cfg.TLS.SessionCacheSize,
 		KeyLogPath:         e.cfg.TLS.KeyLogPath,
 	}
+
+	// ServerCAFile：客户端用，指向信任的服务端根 CA PEM。
+	// 优先级最高 —— 一旦设置，覆盖 use_system_cas / use_mozilla_ca。
+	// 这是企业内网 mTLS + 自签 CA 部署的标准做法。
+	if e.cfg.TLS.ServerCAFile != "" {
+		pemData, err := os.ReadFile(e.cfg.TLS.ServerCAFile)
+		if err != nil {
+			return opts, fmt.Errorf("read server_ca_file %q: %w", e.cfg.TLS.ServerCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return opts, fmt.Errorf("server_ca_file %q contains no valid PEM-encoded certificates", e.cfg.TLS.ServerCAFile)
+		}
+		opts.RootCAs = pool
+	}
+
+	// 启用 KeyLog 时打印高亮警告（密钥日志会让 TLS 流量可被解密，仅供调试）
+	if e.cfg.TLS.KeyLogPath != "" {
+		slog.Warn("⚠️  TLS KeyLog ENABLED: master secrets will be written to file. "+
+			"Anyone with access to this file can decrypt all TLS traffic. "+
+			"USE ONLY FOR DEBUGGING; never enable in production.",
+			"path", e.cfg.TLS.KeyLogPath)
+	}
+
+	return opts, nil
 }
 
 // startAdminServer 启动客户端管理 HTTP 接口，暴露统计信息给 GUI。

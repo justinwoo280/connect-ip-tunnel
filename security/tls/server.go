@@ -127,11 +127,23 @@ func NewServer(opts ServerOptions) (ServerConfig, error) {
 		if opts.ClientCAFile != "" {
 			caCertPEM, _ = os.ReadFile(opts.ClientCAFile)
 		}
-		crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, caCertPEM, opts.Metrics, nil)
+		if opts.RequireCRL {
+			crlFetcher, err = NewCRLFetcherStrict(opts.CRLUrl, interval, caCertPEM, opts.Metrics, nil)
+		} else {
+			crlFetcher, err = NewCRLFetcher(opts.CRLUrl, interval, caCertPEM, opts.Metrics, nil)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("init CRL fetcher: %w", err)
 		}
 		injectCRLVerifier(tlsCfg, crlFetcher)
+	}
+
+	// KeyLog 启用警告（密钥日志会让所有 TLS 流量可被解密，仅供调试）
+	if opts.KeyLogPath != "" {
+		// 不依赖 slog（避免引入循环），直接写 stderr
+		fmt.Fprintf(os.Stderr,
+			"⚠️  TLS KeyLog ENABLED at %q. Anyone with read access to this file can decrypt ALL TLS traffic. USE FOR DEBUGGING ONLY.\n",
+			opts.KeyLogPath)
 	}
 
 	return &serverConfig{

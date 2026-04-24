@@ -27,6 +27,10 @@ type CRLFetcher struct {
 	httpClient *http.Client // 携带自定义 CA，用于访问自签证书的 certsrv
 	metrics    *observability.Metrics
 
+	// require 为 true 时进入严格模式：CRL 不可用 → 拒绝所有连接；
+	// 为 false 时为宽松模式：CRL 未拉取成功时放行（向后兼容）。
+	require bool
+
 	// 可观测性字段
 	startedAt          time.Time // 启动时间
 	firstFetchSuccessAt time.Time // 首次成功拉取时间
@@ -43,6 +47,17 @@ type CRLFetcher struct {
 // 初始拉取失败不阻塞启动：certsrv 可能比主服务晚启动，
 // 此时 crl 为 nil，VerifyFunc 会放行所有连接（宽松模式），
 // 后台 loop 会持续重试直到拉取成功。
+// NewCRLFetcherStrict 与 NewCRLFetcher 相同，但启用严格模式。
+// 严格模式下，CRL 未成功拉取时所有 TLS 握手都会被拒绝。
+func NewCRLFetcherStrict(url string, interval time.Duration, caCertPEM []byte, metrics *observability.Metrics, log *slog.Logger) (*CRLFetcher, error) {
+	f, err := NewCRLFetcher(url, interval, caCertPEM, metrics, log)
+	if err != nil {
+		return nil, err
+	}
+	f.require = true
+	return f, nil
+}
+
 func NewCRLFetcher(url string, interval time.Duration, caCertPEM []byte, metrics *observability.Metrics, log *slog.Logger) (*CRLFetcher, error) {
 	if log == nil {
 		log = slog.Default()
@@ -103,7 +118,11 @@ func (f *CRLFetcher) VerifyFunc() func([][]byte, [][]*x509.Certificate) error {
 		f.mu.RUnlock()
 
 		if crl == nil {
-			// 没有 CRL 则放行（宽松模式）
+			// 严格模式：拒绝所有连接，直到 CRL 可用
+			if f.require {
+				return fmt.Errorf("tls: CRL not yet available, refusing connection (strict mode)")
+			}
+			// 宽松模式（默认）：放行，避免 certsrv 启动慢阻塞主服务
 			return nil
 		}
 

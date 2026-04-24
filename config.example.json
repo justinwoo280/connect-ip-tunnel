@@ -13,7 +13,7 @@
   },
   "tls": {
     "server_name": "proxy.example.com",
-    "insecure_skip_verify": false,
+    "_comment_trust_anchor": "信任锚优先级: server_ca_file > use_mozilla_ca > use_system_cas. 公网证书可设 use_mozilla_ca 或 use_system_cas, 自签 CA 设 server_ca_file.",
     "enable_pqc": true,
     "use_system_cas": false,
     "use_mozilla_ca": true,

@@ -180,6 +180,20 @@ func (c *ClientConfig) Validate() error {
 	if c.TUN.MTU < 1280 || c.TUN.MTU > 65535 {
 		return fmt.Errorf("client: tun.mtu must be between 1280 and 65535")
 	}
+	// 安全硬约束：拒绝任何关闭服务端证书校验的尝试。
+	// 旧版本曾支持 tls.insecure_skip_verify 字段；该选项已被永久移除。
+	// 任何配置中显式出现该字段（无论 true/false）都会在此被检测到 —— true 直接报错，
+	// false 也提示用户清理掉这个废弃字段以免造成误解。
+	if c.TLS.InsecureSkipVerifyDeprecated != nil {
+		if *c.TLS.InsecureSkipVerifyDeprecated {
+			return fmt.Errorf("client: tls.insecure_skip_verify=true is no longer supported; " +
+				"set tls.server_ca_file to point at the trusted CA PEM, " +
+				"or use tls.use_mozilla_ca / tls.use_system_cas for public PKI. " +
+				"There is intentionally no way to disable server certificate verification, even in dev")
+		}
+		slog.Warn("client.tls.insecure_skip_verify is a deprecated field and is ignored; " +
+			"please remove it from your config")
+	}
 	// 管理 API 鉴权检查：非 loopback 地址必须设置 token
 	if c.AdminListen != "" && !isLoopback(c.AdminListen) && c.AdminToken == "" {
 		return fmt.Errorf("client: admin_token is required when admin_listen is not a loopback address")

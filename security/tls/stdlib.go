@@ -23,13 +23,15 @@ func (p *stdlibProvider) NewClient(_ context.Context, opts ClientOptions) (Clien
 		return nil, fmt.Errorf("tls: build root CAs: %w", err)
 	}
 
+	// 安全约束：永远不暴露 InsecureSkipVerify 给上层。
+	// 信任锚（RootCAs）必须由 ClientOptions 显式提供，否则使用默认行为。
+	// 任何情况下都强制验证服务端证书 + ServerName。
 	base := &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		ServerName:         opts.ServerName,
-		NextProtos:         append([]string(nil), opts.NextProtos...),
-		InsecureSkipVerify: opts.InsecureSkipVerify,
-		RootCAs:            roots,
-		CurvePreferences:   buildCurvePreferences(opts.EnablePQC),
+		MinVersion:       tls.VersionTLS13,
+		ServerName:       opts.ServerName,
+		NextProtos:       append([]string(nil), opts.NextProtos...),
+		RootCAs:          roots,
+		CurvePreferences: buildCurvePreferences(opts.EnablePQC),
 	}
 
 	// mTLS 客户端证书加载（如果配置了证书和私钥）
