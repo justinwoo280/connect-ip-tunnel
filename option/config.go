@@ -337,3 +337,23 @@ type BBRv2Config struct {
 	// Aggressive 激进模式：初始窗口更大，适合高带宽低延迟线路（默认 false）
 	Aggressive bool `json:"aggressive,omitempty"`
 }
+
+// 以下 getter 方法实现了 transport/http3 包的 bbr2ConfigGetter 接口，
+// 让 ApplyCongestionControl(conn, cfg) 可以在不引入对 option 包反向依赖的情况下
+// 拿到 BBRv2 子参数。
+//
+// 选择 getter 模式而非直接暴露字段：
+//   1. 解耦 — http3 包通过 interface 拿数据，不需要 import option，
+//      避免 option ↔ http3 的循环依赖风险；
+//   2. 兼容 — 未来字段重命名 / 调整存储方式，只要保持方法签名稳定即可；
+//   3. 单元测试 — 业务调用方可以传 mock 对象走 ApplyCongestionControl。
+
+func (c CongestionConfig) GetAlgorithm() string                  { return c.Algorithm }
+func (c CongestionConfig) GetBBR2LossThreshold() float64         { return c.BBRv2.LossThreshold }
+func (c CongestionConfig) GetBBR2Beta() float64                  { return c.BBRv2.Beta }
+func (c CongestionConfig) GetBBR2StartupFullBwRounds() int       { return c.BBRv2.StartupFullBwRounds }
+func (c CongestionConfig) GetBBR2ProbeRTTPeriod() time.Duration  { return c.BBRv2.ProbeRTTPeriod.Duration }
+func (c CongestionConfig) GetBBR2ProbeRTTDuration() time.Duration {
+	return c.BBRv2.ProbeRTTDuration.Duration
+}
+func (c CongestionConfig) GetBBR2Aggressive() bool { return c.BBRv2.Aggressive }

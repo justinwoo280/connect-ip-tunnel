@@ -183,7 +183,13 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 		default:
 		}
 
-		n, err := d.dev.Read(bufs, sizes, 0)
+		// Linux wireguard-go 在 vnetHdr=true（绝大多数现代内核）时，要求 Read 调用方
+		// 在 buf 头部预留 VirtioNetHdrLen 字节作为 virtio_net_hdr 区域，
+		// 否则会返回 "invalid offset" 整批失败、整个下行链路停摆。
+		// 其它平台 vnetHdr=false 时，多传 offset 也会被 wireguard-go 自动跳过，是安全的。
+		const offset = tun.VirtioNetHdrLen
+
+		n, err := d.dev.Read(bufs, sizes, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -198,7 +204,8 @@ func (d *PacketDispatcher) Run(ctx context.Context) error {
 				continue
 			}
 
-			pkt := bufs[i][:pktLen]
+			// 实际 IP 包数据从 buf[offset:] 起，长度为 sizes[i]
+			pkt := bufs[i][offset : offset+pktLen]
 			dstAddr, ok := parseDstAddr(pkt)
 			if !ok {
 				continue

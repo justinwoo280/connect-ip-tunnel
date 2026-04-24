@@ -16,6 +16,7 @@ import (
 	"connect-ip-tunnel/common/bufferpool"
 	"connect-ip-tunnel/common/safe"
 	"connect-ip-tunnel/observability"
+	"connect-ip-tunnel/platform/tun"
 	"connect-ip-tunnel/tunnel/connectip"
 
 	connectipgo "github.com/quic-go/connect-ip-go"
@@ -202,24 +203,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer flushTimer.Stop()
 		
 		// flush 辅助函数：批量写入 TUN 并释放缓冲区
+		//
+		// 重要：bufs 中每个缓冲区前 tun.VirtioNetHdrLen 字节是 wireguard-go 要求的
+		// virtio_net_hdr 预留区，实际 IP 包数据从 buf[VirtioNetHdrLen:] 开始；
+		// Write 调用必须传 offset=VirtioNetHdrLen，否则 Linux 内核 vnetHdr 路径会返回
+		// "invalid offset" 整批失败（曾导致下行完全不通的回归 bug）。
 		flush := func() {
 			if len(bufs) == 0 {
 				return
 			}
-			
-			// 批量写入 TUN（offset=0 用于 virtio_net_hdr）
-			n, err := s.tunDevice.Write(bufs, 0)
+
+			// 批量写入 TUN，offset = virtio_net_hdr 预留头长度
+			n, err := s.tunDevice.Write(bufs, tun.VirtioNetHdrLen)
 			if err != nil {
 				log.Printf("[server] session %s batch tun write error: %v", sessionID, err)
 			}
-			
-			// 统计已写入的包
+
+			// 统计已写入的包（实际 IP 包长度 = buf 长度 - 预留头）
 			if m := observability.Global; m != nil {
 				for i := 0; i < n && i < len(bufs); i++ {
-					m.AddRx(clientCN, len(bufs[i]))
+					payloadLen := len(bufs[i]) - tun.VirtioNetHdrLen
+					if payloadLen < 0 {
+						payloadLen = 0
+					}
+					m.AddRx(clientCN, payloadLen)
 				}
 			}
-			
+
 			// 释放所有缓冲区到池
 			for _, buf := range bufs {
 				bufferpool.PutPacket(buf)
@@ -292,9 +302,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// 将包添加到批次（复制切片以保留长度信息）
-			pktCopy := make([]byte, n)
-			copy(pktCopy, buf[:n])
+			// 将包添加到批次：在 wireguard-go 要求的 virtio_net_hdr 预留区之后拷入实际 IP 包。
+			// 缓冲区布局：[ 0 .. VirtioNetHdrLen ) = vnethdr 预留 ; [ VirtioNetHdrLen .. ) = IP 包数据
+			pktCopy := make([]byte, tun.VirtioNetHdrLen+n)
+			copy(pktCopy[tun.VirtioNetHdrLen:], buf[:n])
 			bufferpool.PutPacket(buf)
 			bufs = append(bufs, pktCopy)
 			

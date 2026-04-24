@@ -4,6 +4,22 @@ import "errors"
 
 var ErrNotImplemented = errors.New("platform/tun: not implemented")
 
+// VirtioNetHdrLen 是 Linux virtio_net_hdr 结构体大小（10 字节）。
+//
+// Linux 上 wireguard-go 当内核支持 vnetHdr（绝大多数现代 5.x+ 内核都支持）时，
+// Write/Read 会要求调用方在 buf 头部预留 VirtioNetHdrLen 字节作为 offset 区域，
+// 否则返回 "invalid offset" 错误，导致整个批次写入失败。
+//
+// 调用约定：
+//   - 缓冲区分配长度至少为 VirtioNetHdrLen + MTU
+//   - 实际 IP 包数据放在 buf[VirtioNetHdrLen:]
+//   - 调用 dev.Write(bufs, VirtioNetHdrLen)（offset 参数）
+//
+// 其它平台（Windows wintun、macOS utun、Android）vnetHdr=false，
+// 多传 offset=VirtioNetHdrLen 也是安全的（wireguard-go 会跳过头部），
+// 因此跨平台代码统一使用此常量即可。
+const VirtioNetHdrLen = 10
+
 // Device 是平台无关的 TUN 设备抽象，只暴露原始 IP 包读写能力。
 type Device interface {
 	Name() (string, error)

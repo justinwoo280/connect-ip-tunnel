@@ -78,11 +78,9 @@ func (d *linuxDevice) ReadPacket(buf []byte) (int, error) {
 	return d.singleSizes[0], nil
 }
 
-// virtioNetHdrLen 是 Linux virtio_net_hdr 结构体的大小（10 字节）。
-// wireguard-go 在内核支持 virtio_net_hdr 时（vnetHdr=true），要求 Write 调用者
-// 在 buf 头部预留 virtioNetHdrLen 字节作为 offset 区域，否则会返回 "invalid offset"。
-// 即使 vnetHdr=false，多传 offset=virtioNetHdrLen 也是安全的（wireguard-go 会直接跳过头部）。
-const virtioNetHdrLen = 10
+// virtioNetHdrLen 是 VirtioNetHdrLen 的本地别名，保持原文件可读性。
+// 共享常量定义见 device.go: tun.VirtioNetHdrLen。
+const virtioNetHdrLen = VirtioNetHdrLen
 
 func (d *linuxDevice) WritePacket(pkt []byte) error {
 	if len(pkt) == 0 {

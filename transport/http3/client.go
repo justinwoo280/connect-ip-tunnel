@@ -147,34 +147,11 @@ func (f *Factory) Dial(ctx context.Context, tgt Target) (*qhttp3.ClientConn, err
 		}
 
 		// 握手成功
-		// 根据配置注入拥塞控制算法
-		if f.opts.Congestion.Algorithm == "bbr2" {
-			cfg := f.opts.Congestion.BBRv2
-			params := bbr2.DefaultParams()
-			if cfg.LossThreshold > 0 {
-				params.LossThreshold = cfg.LossThreshold
-			}
-			if cfg.Beta > 0 {
-				params.Beta = cfg.Beta
-			}
-			if cfg.StartupFullBwRounds > 0 {
-				params.StartupFullBwRounds = cfg.StartupFullBwRounds
-			}
-			if cfg.ProbeRTTPeriod.Duration > 0 {
-				params.ProbeRttPeriod = cfg.ProbeRTTPeriod.Duration
-			}
-			if cfg.ProbeRTTDuration.Duration > 0 {
-				params.ProbeRttDuration = cfg.ProbeRTTDuration.Duration
-			}
-			sender := bbr2.NewBBR2SenderWithParams(
-				bbr2.DefaultClock{},
-				congestion.InitialPacketSize,
-				0,
-				cfg.Aggressive,
-				params,
-			)
-			quicConn.SetCongestionControl(sender)
-		}
+		// 根据配置注入拥塞控制算法。
+		// 注意：必须在握手完成后立刻调用，且每条 quic.Conn 只调一次；
+		// 多次调用或在已发包之后调用会让 BBRv2 的 BandwidthSampler 看到
+		// "属于旧算法发出"的 ACK，导致带宽估算异常。
+		ApplyCongestionControl(quicConn, f.opts.Congestion)
 
 		f.mu.Lock()
 		if f.transport == nil {
@@ -191,6 +168,80 @@ func (f *Factory) Dial(ctx context.Context, tgt Target) (*qhttp3.ClientConn, err
 
 // udpNetworkForAddr 根据目标地址判断应使用 "udp4" 还是 "udp6"。
 // 若解析失败或无法判断，保守返回 "udp4"（绝大多数服务端为 IPv4）。
+// ApplyCongestionControl 在握手完成的 *quic.Conn 上注入应用层选定的拥塞算法。
+//
+// 客户端：在 client.go Dial() 拿到 quicConn 后立即调用。
+// 服务端：在 qhttp3.Server.ConnContext 钩子里立即调用（每条新连接一次）。
+//
+// 设计取舍：
+//   - 接受 option.CongestionConfig 而非把字段拆开传，避免新增字段时调用方都要改；
+//   - bbr2 包不直接依赖 quic-go 的 *Conn 类型（避免循环 / 加重依赖图），
+//     故注入 helper 放在 http3 包（已经依赖 quic-go + bbr2）。
+//   - cfg.Algorithm == "" / "cubic" 走 quic-go 内置 cubic（不调用 SetCongestionControl）；
+//     未来加新算法只需在此 switch 加分支。
+func ApplyCongestionControl(conn *quic.Conn, cfg interface {
+	GetAlgorithm() string
+}) {
+	// fast path：interface 适配在最下面提供，避免暴露 option 包到 http3 包外。
+	algo := cfg.GetAlgorithm()
+	switch algo {
+	case "bbr2":
+		applyBBR2(conn, cfg)
+	default:
+		// "" / "cubic" / 未识别值 → 走 quic-go 内置 cubic，不调用 SetCongestionControl。
+	}
+}
+
+// applyBBR2 是 BBRv2 注入的实际实现。它通过 bbr2ConfigGetter 接口拿子参数，
+// 这样 http3 包不需要 import option 包。
+func applyBBR2(conn *quic.Conn, cfg interface{ GetAlgorithm() string }) {
+	getter, ok := cfg.(bbr2ConfigGetter)
+	if !ok {
+		// 调用方传了不实现 BBRv2 子参数 getter 的对象，退化为默认参数。
+		sender := bbr2.NewBBR2SenderWithParams(
+			bbr2.DefaultClock{}, congestion.InitialPacketSize, 0, false, bbr2.DefaultParams(),
+		)
+		conn.SetCongestionControl(sender)
+		return
+	}
+	params := bbr2.DefaultParams()
+	if v := getter.GetBBR2LossThreshold(); v > 0 {
+		params.LossThreshold = v
+	}
+	if v := getter.GetBBR2Beta(); v > 0 {
+		params.Beta = v
+	}
+	if v := getter.GetBBR2StartupFullBwRounds(); v > 0 {
+		params.StartupFullBwRounds = v
+	}
+	if v := getter.GetBBR2ProbeRTTPeriod(); v > 0 {
+		params.ProbeRttPeriod = v
+	}
+	if v := getter.GetBBR2ProbeRTTDuration(); v > 0 {
+		params.ProbeRttDuration = v
+	}
+	sender := bbr2.NewBBR2SenderWithParams(
+		bbr2.DefaultClock{},
+		congestion.InitialPacketSize,
+		0,
+		getter.GetBBR2Aggressive(),
+		params,
+	)
+	conn.SetCongestionControl(sender)
+}
+
+// bbr2ConfigGetter 是 ApplyCongestionControl 期望 BBRv2 配置对象实现的接口。
+// option.CongestionConfig 通过附带方法实现该接口（见 option/config.go）。
+type bbr2ConfigGetter interface {
+	GetAlgorithm() string
+	GetBBR2LossThreshold() float64
+	GetBBR2Beta() float64
+	GetBBR2StartupFullBwRounds() int
+	GetBBR2ProbeRTTPeriod() time.Duration
+	GetBBR2ProbeRTTDuration() time.Duration
+	GetBBR2Aggressive() bool
+}
+
 func udpNetworkForAddr(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	securitytls "connect-ip-tunnel/security/tls"
 
 	"github.com/quic-go/quic-go"
+	connectipthttp3 "connect-ip-tunnel/transport/http3"
 	"connect-ip-tunnel/transport/obfs"
 	qhttp3 "github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
@@ -300,9 +301,18 @@ func (s *Server) Start() error {
 		// 5. 启动 HTTP/3 服务器
 		// EnableDatagrams 必须与 QUIC 层的 EnableDatagrams 一致，
 		// Connect-IP 使用 HTTP/3 Datagram（RFC 9297）转发 IP 包。
+		//
+		// ConnContext 钩子：在每条新 QUIC 连接被 http3 server 接受、
+		// 开始处理之前，注入应用层选定的拥塞控制算法（如 BBRv2）。
+		// 这是服务端实现"下行用 BBRv2 而非默认 cubic"的唯一干净挂载点。
+		// 必须在握手完成后立刻、且每条连接只调一次（详见 ApplyCongestionControl 注释）。
 		s.httpServer = &qhttp3.Server{
 			Handler:         s,
 			EnableDatagrams: true,
+			ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+				connectipthttp3.ApplyCongestionControl(c, s.cfg.HTTP3.Congestion)
+				return ctx
+			},
 		}
 
 		safe.Go("server.http3", func() {

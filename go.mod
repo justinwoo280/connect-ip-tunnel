@@ -40,4 +40,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/quic-go/quic-go => github.com/justinwoo280/quic-go v0.59.0-bbr2
+replace github.com/quic-go/quic-go => github.com/justinwoo280/quic-go v0.59.0-mod1
