@@ -104,9 +104,19 @@ func (d *PacketDispatcher) cloneAndRemove(entry *dispatchEntry) *indexes {
 	return newIdx
 }
 
+// inboundChanBufLen 是每条 session 的下行 channel 缓冲长度。
+//
+// 必须与 quic-go 的 maxDatagramSendQueueLen 量级匹配。如果太小（如默认 256），
+// 当 BBRv2 cwnd 涨到允许 4096 个 datagram in-flight 时，dispatcher 在 1ms 内
+// 就能把 channel 灌满，多余包走 select default 静默丢弃 → TCP 反复重传 →
+// 用户观感就是"小响应通、大响应挂死"。
+//
+// 4096 与 quic-go 的 datagram send queue 对齐，吸收能力一致。
+const inboundChanBufLen = 4096
+
 // RegisterSession 注册一个 session，指定其分配的 IP 前缀。
 func (d *PacketDispatcher) RegisterSession(sessionID string, ipv4Prefix, ipv6Prefix netip.Prefix) chan []byte {
-	inbound := make(chan []byte, 256)
+	inbound := make(chan []byte, inboundChanBufLen)
 	entry := &dispatchEntry{
 		ipv4Prefix: ipv4Prefix,
 		ipv6Prefix: ipv6Prefix,
