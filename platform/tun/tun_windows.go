@@ -292,9 +292,27 @@ func (c *windowsConfigurator) Setup(cfg NetworkConfig) error {
 	restoreOtherDNS(ifName)
 	_ = removeNRPTRule()
 	suppressOtherDNS(ifName)
-	// 重新应用 NRPT 规则
+	// 重新应用 NRPT 规则。
+	//
+	// 关键：必须把 DNSv4 / DNSv6 一起注册，否则会出现"配 DNSv6 → IPv6 死"的现象：
+	//   - 旧实现只在 DNSv4 != "" 时注册 NRPT；
+	//   - 当用户只配置了 DNSv6（DNSv4 留空）时，NRPT 规则**不存在**；
+	//   - 而 suppressOtherDNS() 已经把所有其它接口 metric 调到 9999；
+	//   - Windows 解析器退到 wintun 接口自身配置的 DNS = 仅 IPv6；
+	//   - DNS 查询包被强制走 IPv6 隧道 → 触发 IPv6 PMTU 黑洞 → DNS 全部超时 → IPv6 看似"完全死"。
+	//
+	// 解法：把两组 DNS 都收集起来一起塞给 NRPT，IPv4 优先。
+	// 这样即使用户只配 DNSv6，IPv6 通过本身正常时仍然可解析；DNSv4 + DNSv6 都配时
+	// IPv4 解析器优先，IPv6 隧道异常也不会拖垮整个 DNS。
+	var nrptDNS []string
 	if cfg.DNSv4 != "" {
-		if err := applyNRPTRule(cfg.DNSv4); err != nil {
+		nrptDNS = append(nrptDNS, cfg.DNSv4)
+	}
+	if cfg.DNSv6 != "" {
+		nrptDNS = append(nrptDNS, cfg.DNSv6)
+	}
+	if len(nrptDNS) > 0 {
+		if err := applyNRPTRule(strings.Join(nrptDNS, ",")); err != nil {
 			log.Printf("[tun] NRPT rule apply failed (non-fatal): %v", err)
 		}
 	}
@@ -432,23 +450,16 @@ func (c *windowsConfigurator) UpdateAddress(prev, next NetworkConfig) error {
 		}
 	}
 
-	// DNS 差量（v4）
+	// DNS 差量：NRPT 是全局规则（不绑接口），v4 / v6 必须**一起**重写，
+	// 否则 v6 那段 _ = removeNRPTRule(); applyNRPTRule(只有 v4) 会把另一组覆盖掉。
+	// 接口级 dnsserver 配置仍按各自家族独立维护（netsh 命令本身分 ipv4/ipv6）。
 	if prev.DNSv4 != next.DNSv4 {
 		if next.DNSv4 == "" {
 			_ = run("netsh", "interface", "ip", "set", "dns", "name="+ifName, "dhcp")
 		} else if err := run("netsh", "interface", "ip", "set", "dns", "name="+ifName, "static", next.DNSv4, "primary"); err != nil {
 			log.Printf("[tun] update dnsv4: %v", err)
 		}
-		_ = removeNRPTRule()
-		if next.DNSv4 != "" {
-			if err := applyNRPTRule(next.DNSv4); err != nil {
-				log.Printf("[tun] NRPT reapply: %v", err)
-			}
-		}
-		_ = run("ipconfig", "/flushdns")
 	}
-
-	// DNS 差量（v6）
 	if prev.DNSv6 != next.DNSv6 {
 		_ = run("netsh", "interface", "ipv6", "delete", "dnsserver", ifName, "all")
 		if next.DNSv6 != "" {
@@ -456,6 +467,22 @@ func (c *windowsConfigurator) UpdateAddress(prev, next NetworkConfig) error {
 				log.Printf("[tun] update dnsv6: %v", err)
 			}
 		}
+	}
+	if prev.DNSv4 != next.DNSv4 || prev.DNSv6 != next.DNSv6 {
+		_ = removeNRPTRule()
+		var nrptDNS []string
+		if next.DNSv4 != "" {
+			nrptDNS = append(nrptDNS, next.DNSv4)
+		}
+		if next.DNSv6 != "" {
+			nrptDNS = append(nrptDNS, next.DNSv6)
+		}
+		if len(nrptDNS) > 0 {
+			if err := applyNRPTRule(strings.Join(nrptDNS, ",")); err != nil {
+				log.Printf("[tun] NRPT reapply: %v", err)
+			}
+		}
+		_ = run("ipconfig", "/flushdns")
 	}
 
 	// MTU 同步（独立于地址变化）
@@ -625,11 +652,58 @@ func restoreOtherDNS(tunIfName string) {
 	_, _ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd).CombinedOutput()
 }
 
+// init 在 Windows 平台覆盖 device.go 中默认 no-op 的 CleanupStaleClientState
+// 实现。其它平台不会注册，调用 tun.CleanupStaleClientState() 时直接 no-op。
+func init() {
+	CleanupStaleClientState = cleanupStaleClientStateWindows
+}
+
+// cleanupStaleClientStateWindows 在客户端进程**启动时**调用，best-effort 清理
+// 上一轮进程异常退出（kill -9 / panic / 系统断电）残留在 OS 中的客户端状态。
+//
+// 当前清理对象：
+//  1. NRPT 规则（Comment='connect-ip-tunnel'）— **最重要**：残留会让所有 DNS
+//     查询被定向到一个不存在的 wintun 接口，结果整机断网，普通用户难自救。
+//  2. 物理网卡 InterfaceMetric（被 suppressOtherDNS 调到 9999 的）— 残留会让
+//     用户即使断开隧道，物理网卡 DNS 仍是低优先级，浏览器 DNS 解析变慢。
+//
+// 任何子步骤失败都只 log warning，绝不 panic 或返回错误（清理本身失败不应
+// 阻止程序启动）。
+func cleanupStaleClientStateWindows() {
+	// 1) 清理残留 NRPT 规则。removeNRPTRule 内部用 Comment 过滤，只删自己注册的，
+	//    不会动用户其它 VPN / DirectAccess / 企业策略写入的规则。
+	if err := removeNRPTRule(); err != nil {
+		log.Printf("[tun] startup cleanup: remove stale NRPT rule warning: %v", err)
+	}
+	// 2) 恢复所有非 wintun 接口的 InterfaceMetric=AutomaticMetric。
+	//    传 "" 作为 tunIfName → restoreOtherDNS 内部的 Where Name -ne ""
+	//    匹配所有 Up 接口 → 全部恢复，正好覆盖"上次没正常 Teardown"的情况。
+	restoreOtherDNS("")
+}
+
+// applyNRPTRule 注册一条捕获所有 DNS 查询的 NRPT 规则。
+//
+// 参数 dns 接受逗号分隔的多个 DNS server 地址（IPv4 / IPv6 混用允许），
+// 调用方用 strings.Join(servers, ",") 传入即可。Add-DnsClientNrptRule
+// -NameServers 接受 string[]，所以这里把逗号串重新拆成 PowerShell 数组字面量。
 func applyNRPTRule(dns string) error {
+	// 把 "1.1.1.1,2606:4700:4700::1111" 转成 PS 数组字面量 "'1.1.1.1','2606:...'"
+	parts := strings.Split(dns, ",")
+	psArr := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		psArr = append(psArr, "'"+p+"'")
+	}
+	if len(psArr) == 0 {
+		return fmt.Errorf("no dns servers provided")
+	}
 	cmd := fmt.Sprintf(
 		`Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'connect-ip-tunnel' } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; `+
-			`Add-DnsClientNrptRule -Namespace '.' -NameServers '%s' -Comment 'connect-ip-tunnel'`,
-		dns,
+			`Add-DnsClientNrptRule -Namespace '.' -NameServers @(%s) -Comment 'connect-ip-tunnel'`,
+		strings.Join(psArr, ","),
 	)
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd).CombinedOutput()
 	if err != nil {

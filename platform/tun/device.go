@@ -41,6 +41,18 @@ type Factory interface {
 	Create(cfg CreateConfig) (Device, error)
 }
 
+// CleanupStaleClientState 是平台相关的"启动期清理"钩子。
+//
+// 调用方应在客户端进程**主入口最早**位置调用一次，用于擦除上一轮进程异常退出
+// （kill -9 / panic / 系统断电）残留在操作系统中的客户端状态——例如 Windows 上
+// 的 NRPT 规则、被压低优先级的物理网卡 InterfaceMetric 等。
+//
+// 默认实现是 no-op，各平台通过 init() 覆盖（目前仅 Windows 提供真实实现）。
+//
+// 该函数永远不应当 panic 或返回错误：清理失败不能阻止程序启动；调用方也不需要
+// 关心其内部行为，安全起见可在任何客户端启动路径都调用一次（重复调用幂等）。
+var CleanupStaleClientState = func() {}
+
 // Configurator 负责系统网络配置（地址 / 路由 / DNS）和回滚。
 //
 // UpdateAddress 用于热更新 TUN 上的地址（典型场景：服务端二次下发

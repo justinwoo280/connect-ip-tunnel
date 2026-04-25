@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -347,6 +348,19 @@ func (rm *RoutingManager) enableIPForwarding() error {
 func (rm *RoutingManager) setupNAT(outInterface string) error {
 	switch runtime.GOOS {
 	case "linux":
+		// 0. 先 best-effort 清理一次旧规则，再追加新规则。
+		//
+		// 背景：服务端非优雅退出（kill -9 / OOM / panic / 容器重启等）时，
+		// 上一轮 setupNAT 注入的 iptables 规则会**残留**在内核 netfilter 表中。
+		// 旧版本 setupNAT 直接 -A / -I 追加，结果每次重启都把同一条规则又添一次：
+		// 实测看到 ip6tables -t nat -nvL POSTROUTING 中堆了 5 条完全相同的
+		// MASQUERADE，这种重复虽然不影响功能，但 cleanup 时只删一条，越积越多，
+		// 也让 -nvL 的 pkts/bytes 计数失真，给排障增加噪音。
+		//
+		// 这里调一次 cleanupNAT 把可能存在的旧规则全删掉（参数完全对齐），
+		// 错误全部忽略——目标只是去重，不是要清理失败时阻断启动。
+		_ = rm.cleanupNAT(outInterface)
+
 		// 1. 添加 FORWARD 规则：允许 TUN → 出口 和 出口 → TUN（ESTABLISHED,RELATED）的双向转发。
 		// 许多 VPS 默认 iptables -P FORWARD DROP，不加这些规则流量会被静默丢弃。
 		// 使用 -I（Insert 到链首）确保优先于可能存在的 DROP 规则。
@@ -381,39 +395,22 @@ func (rm *RoutingManager) setupNAT(outInterface string) error {
 
 		// 3. TCP MSS Clamping：防止隧道内 MTU 黑洞
 		//
-		// TUN MTU=1400 → TCP 协商 MSS=1360 → IP 包=1400 字节。
-		// 但 QUIC datagram 还需叠加：QUIC Short Header(~20B) + HTTP/3 Datagram Frame(~5B)
-		// + Salamander Salt(8B) + UDP/IP 外层(28B) ≈ 61B 额外开销。
-		// 若 QUIC 路径 MTU=1450，可用 datagram 载荷=1389 < 1400 → 大 IP 包被静默丢弃。
+		// 外层开销：QUIC short header(~20B) + HTTP/3 Datagram(~5B) + Salamander(8B)
+		// + UDP(8B) + 外层 IP(20/40B) ≈ 60-80B。
 		//
-		// 表现：HTTP（小响应）正常，HTTPS（TLS 握手 3000-4000B 拆成多个大段）超时。
+		// IPv4：MSS=mssV4ClampBytes(1200) → TCP+IP=1240B → 加 60B 外层 ≈ 1300B UDP，
+		//       适配任何合理的公网 path MTU（PPPoE 1492、4G 1300+）。
+		// IPv6：IPv6 头比 IPv4 多 20B，因此 IPv6 MSS 必须再 -20。
+		//       MSS=mssV6ClampBytes(1180) → TCP+IPv6=1240B（与 IPv4 持平），
+		//       否则 1200 时 TCP+IPv6=1260B 会落入实测的 IPv6 path MTU 黑洞
+		//       （详见会话日志 2026-04-25：IPv6 ping 1200 字节通、1260 字节超时）。
 		//
-		// 修复：在 FORWARD 链 mangle 表上钳制 SYN 包的 MSS 为 1200，
-		// 确保后续 TCP 段 ≤ 1200B → IP包 ≤ 1240B → 适配任何合理的 QUIC 路径 MTU。
-		cmd = exec.Command("iptables", "-t", "mangle", "-A", "FORWARD",
-			"-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-			"-j", "TCPMSS", "--set-mss", "1200")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[routing] warning: iptables mss clamp (out): %v (output: %s)", err, string(out))
-		}
-		cmd = exec.Command("iptables", "-t", "mangle", "-A", "FORWARD",
-			"-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-			"-j", "TCPMSS", "--set-mss", "1200")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[routing] warning: iptables mss clamp (in): %v (output: %s)", err, string(out))
-		}
-		// IPv6 MSS clamp
-		cmd = exec.Command("ip6tables", "-t", "mangle", "-A", "FORWARD",
-			"-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-			"-j", "TCPMSS", "--set-mss", "1200")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[routing] warning: ip6tables mss clamp: %v (output: %s)", err, string(out))
-		}
-		cmd = exec.Command("ip6tables", "-t", "mangle", "-A", "FORWARD",
-			"-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-			"-j", "TCPMSS", "--set-mss", "1200")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[routing] warning: ip6tables mss clamp: %v (output: %s)", err, string(out))
+		// 表现：HTTP/小响应正常；HTTPS 大握手 / DNSv6 解析超时 → 改 1180 后通。
+		for _, args := range buildMSSClampRules(rm.tunIfName) {
+			cmd = exec.Command(args[0], args[1:]...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("[routing] warning: %s mss clamp: %v (output: %s)", args[0], err, string(out))
+			}
 		}
 
 		// 2. NAT MASQUERADE
@@ -470,14 +467,22 @@ func (rm *RoutingManager) cleanupNAT(outInterface string) error {
 			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 		_ = cmd.Run()
 
-		// 清理 MSS Clamping 规则（mangle 表）
-		for _, args := range [][]string{
-			{"iptables", "-t", "mangle", "-D", "FORWARD", "-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
-			{"iptables", "-t", "mangle", "-D", "FORWARD", "-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
-			{"ip6tables", "-t", "mangle", "-D", "FORWARD", "-o", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
-			{"ip6tables", "-t", "mangle", "-D", "FORWARD", "-i", rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1200"},
-		} {
-			_ = exec.Command(args[0], args[1:]...).Run()
+		// 清理 MSS Clamping 规则（mangle 表）：用 buildMSSClampRules 反推 -D 命令，
+		// 保证 add / del 规则参数永远一致。同时清理历史 IPv6=1200 规则，
+		// 避免升级到当前版本（IPv6=1180）时旧规则成"幽灵"。
+		for _, args := range buildMSSClampRules(rm.tunIfName) {
+			delArgs := append([]string{}, args...)
+			for i, a := range delArgs {
+				if a == "-A" {
+					delArgs[i] = "-D"
+				}
+			}
+			_ = exec.Command(delArgs[0], delArgs[1:]...).Run()
+		}
+		for _, dir := range []string{"-o", "-i"} {
+			_ = exec.Command("ip6tables", "-t", "mangle", "-D", "FORWARD",
+				dir, rm.tunIfName, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+				"-j", "TCPMSS", "--set-mss", "1200").Run()
 		}
 		for _, pool := range rm.clientPool {
 			if pool.Addr().Is4() {
@@ -540,6 +545,40 @@ func (rm *RoutingManager) detectDefaultInterface() string {
 }
 
 // prefixToNetmask 将前缀长度转换为 netmask
+// MSS clamp 数值定义（变更说明见 setupNAT 注释）
+const (
+	mssV4ClampBytes = 1200 // IPv4: TCP+IP=1240B
+	mssV6ClampBytes = 1180 // IPv6: TCP+IPv6=1240B（与 IPv4 持平，避开实测 IPv6 黑洞）
+)
+
+// buildMSSClampRules 返回需要 -A 到 mangle FORWARD 链的全部 MSS clamp 规则。
+//
+// 抽出来的目的：
+//  1. add (setupNAT) 与 del (cleanupNAT) 共用同一组规则定义，避免参数偏差导致
+//     "明明 add 了却 del 不掉、积累出多份重复规则"的问题（之前 IPv6 NAT 表里堆了
+//     5 条相同 MASQUERADE 就是这个 pattern 的另一种症状）；
+//  2. 升级 MSS 数值（如 IPv6: 1200→1180）时只需改常量，不需改两处分散的命令字符串。
+//
+// 每个返回值是一个 exec.Command 的 args 序列（首元素是命令名）。
+func buildMSSClampRules(tunIfName string) [][]string {
+	mkRule := func(prog, dir, mss string) []string {
+		return []string{
+			prog, "-t", "mangle", "-A", "FORWARD",
+			dir, tunIfName, "-p", "tcp",
+			"--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--set-mss", mss,
+		}
+	}
+	v4 := strconv.Itoa(mssV4ClampBytes)
+	v6 := strconv.Itoa(mssV6ClampBytes)
+	return [][]string{
+		mkRule("iptables", "-o", v4),
+		mkRule("iptables", "-i", v4),
+		mkRule("ip6tables", "-o", v6),
+		mkRule("ip6tables", "-i", v6),
+	}
+}
+
 func prefixToNetmask(bits int) string {
 	if bits < 0 || bits > 32 {
 		return "255.255.255.255"

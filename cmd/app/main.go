@@ -14,6 +14,7 @@ import (
 	"connect-ip-tunnel/certsrv"
 	"connect-ip-tunnel/engine"
 	"connect-ip-tunnel/option"
+	"connect-ip-tunnel/platform/tun"
 	"connect-ip-tunnel/server"
 )
 
@@ -138,6 +139,10 @@ Flags:
 }
 
 func runClient(cfg option.ClientConfig) {
+	// 启动期清理：擦除上一轮进程异常退出残留的 OS 状态（Windows NRPT 规则等）。
+	// 永远不会失败/阻塞；非 Windows 平台是 no-op。详见 platform/tun/device.go。
+	tun.CleanupStaleClientState()
+
 	eng, err := engine.New(cfg)
 	if err != nil {
 		log.Fatalf("create client engine failed: %v", err)
